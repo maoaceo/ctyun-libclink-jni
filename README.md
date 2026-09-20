@@ -32,17 +32,30 @@ chmod +x setup.sh ctyun.sh CtyunStart clouddesktop-qml
 ```
 > 直接从官方接口解析返回当前账号下所有设备列表、8位纯数字 ID、设备编码（`D00...`）以及当前的开关机状态（`已关机` / `运行中`）。
 
-### 4. 查看连接状态
+### 4. 远程电源控制 (官方签名开机/唤醒/关机)
+```bash
+# 触发开机 (对齐 ctyun-dashboard Triple Link 双重信令链路)
+./ctyun.sh boot 23794229 poweron
+
+# 触发唤醒
+./ctyun.sh boot 23794229 awake
+
+# 触发关机 / 重启
+./ctyun.sh boot 23794229 shutdown
+./ctyun.sh boot 23794229 reboot
+```
+
+### 5. 查看连接状态
 ```bash
 ./ctyun.sh status
 ```
 
-### 5. 实时查看串流日志
+### 6. 实时查看串流日志
 ```bash
 ./ctyun.sh log
 ```
 
-### 6. 停止运行
+### 7. 停止运行
 ```bash
 ./ctyun.sh stop
 ```

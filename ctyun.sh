@@ -27,6 +27,15 @@ case "$1" in
             echo "[!] 启动失败，请检查依赖或查看 /tmp/ctyun_app.log"
         fi
         ;;
+    boot)
+        # 手动开机: ./ctyun.sh boot <云电脑ID>
+        if [ -z "$2" ]; then
+            echo "用法: $0 boot <云电脑ID> [动作: poweron|awake|shutdown|reboot]"
+            echo "示例: $0 boot 23794229"
+            exit 1
+        fi
+        python3 "$BASE_DIR/power.py" "$2" "${3:-poweron}"
+        ;;
     rotate)
         # 后台启动两台设备的自动开机与 20 秒真实视讯串流保活
         pkill -9 -f "boot_and_rotate.py" 2>/dev/null || true
