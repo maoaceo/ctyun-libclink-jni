@@ -95,10 +95,20 @@ PY
         QR_URL=$(grep -o 'https://desk.ctyun.cn[^ "]\{1,\}' "$TODAY_LOG" | grep -E 'login-confirm|qrCode' | tail -n 1)
         if [ -n "$QR_URL" ]; then
             echo "=========================================================="
-            echo "📱 天翼云电脑官方登录二维码直链:"
+            echo "📱 天翼云电脑官方登录二维码 (终端直接扫码):"
+            echo "=========================================================="
+            if command -v qrencode >/dev/null 2>&1; then
+                qrencode -t ANSIUTF8 "$QR_URL"
+            else
+                python3 -c "
+import urllib.parse
+print('提示: 安装 qrencode 可在终端直接显示字符二维码 (apt install -y qrencode)')
+"
+            fi
+            echo "=========================================================="
+            echo "🌐 二维码网页直链 (也可复制到浏览器打开):"
             echo "$QR_URL"
             echo "=========================================================="
-            echo "在浏览器打开上述链接，或使用手机微信/App扫描即可登录！"
         else
             echo "[*] 未在最新日志中匹配到二维码，可能已经处于登录状态，或请尝试: $0 restart"
         fi
