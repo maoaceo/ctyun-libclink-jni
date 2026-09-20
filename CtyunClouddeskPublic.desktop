@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=天翼云电脑
+Exec=/opt/ctg/CtyunClouddeskPublic/clouddesktop-qml
+Terminal=false
+Type=Application
+Icon=/opt/ctg/CtyunClouddeskPublic/resource/icon-public.png
+Categories=Utility;

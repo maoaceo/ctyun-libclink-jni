@@ -1,0 +1,102 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>飞书扫码登录</title>
+        <!-- <link rel="stylesheet" type="text/css" href="./spice.css" /> -->
+        <script src="https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/passport/qrcode/LarkSSOSDKWebQRCode-1.0.3.js"></script>
+        <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+        <style>
+          html, body {
+            overflow: hidden;
+            margin: 0;
+            padding: 0;
+            height: 100%;
+          }
+          ::-webkit-scrollbar {
+            display: none;
+          }
+          body {
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+          }
+          #login_container {
+            transform: scale(0.7);
+          }
+      </style>
+      </head>
+
+    <body>
+      <div id="login_container"></div>
+      <script>
+        var QRLoginObj = null;
+        var gotoUrl = "";
+
+        window.onload = function() {
+          // 初始化WebChannel
+          new QWebChannel(qt.webChannelTransport, function(channel) {
+            // 获取QML对象
+            var qtObject = channel.objects.qt;
+
+            // 发送消息到QML
+            function sendToQt(message) {
+              qtObject.sendMessageToQt(message);
+            }
+
+            function sendToQml(message) {
+              qtObject.sendMessageToQml(message);
+            }
+
+            // 接收来自QML的消息
+            qtObject.sendUrlToJs.connect(function(message) {
+              gotoUrl = message;
+              // login_container.style.display = "none";
+              if (typeof QRLogin !== 'undefined') {
+                var QRLoginObj = QRLogin({
+                  id:"login_container",
+                  goto: gotoUrl,
+                  // width: "250",
+                  // height: "250",
+                  style: "width: 250px; height:250px; border:transparent"//可选的，二维码html标签的style属性
+
+                });
+              } else {
+                console.error("QRLogin is not defined");
+              }
+            });
+
+            // 示例：发送消息到QML
+            sendToQt("Load feishu qrcode successfully!");
+
+            var handleMessage = function (event) {   
+              // var eventInfo = {
+              //   origin: event.origin,
+              //   data: event.data,
+              //   type: event.type
+              // };
+              // sendToQml(JSON.stringify(eventInfo));
+
+              // 使用 matchOrigin 和 matchData 方法来判断 message 和来自的页面 url 是否合法
+              // if(QRLoginObj && QRLoginObj.matchOrigin(event.origin) && QRLoginObj.matchData(event.data)) { 
+                var loginTmpCode = event.data.tmp_code; 
+                // 在授权页面地址上拼接上参数 tmp_code，并跳转
+                window.location.href = `${gotoUrl}&tmp_code=${loginTmpCode}`;
+              // }
+            };
+
+            if (typeof window.addEventListener != 'undefined') {   
+              window.addEventListener('message', handleMessage, false);} 
+            else if (typeof window.attachEvent != 'undefined') { 
+              window.attachEvent('onmessage', handleMessage);
+            }
+          });
+        }
+
+      </script>
+    </body>
+</html>

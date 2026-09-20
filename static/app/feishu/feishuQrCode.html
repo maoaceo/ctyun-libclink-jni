@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>飞书扫码登录</title>
+        <!-- <link rel="stylesheet" type="text/css" href="./spice.css" /> -->
+        <script src="https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/passport/qrcode/LarkSSOSDKWebQRCode-1.0.3.js"></script>
+        <style>
+          html, body {
+            overflow: hidden;
+            margin: 0;
+            padding: 0;
+            height: 100%;
+          }
+          ::-webkit-scrollbar {
+            display: none;
+          }
+          body {
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+          }
+          #login_container {
+            transform: scale(0.7);
+          }
+      </style>
+      </head>
+
+    <body>
+      <h1 id="title">请扫描二维码登录飞书</h1>
+      <div id="login_container"></div>
+      <script src="./feishuRender.js"></script>
+    </body>
+</html>

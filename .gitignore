@@ -1,9 +1,8 @@
-bin/
-*.deb
 *.log
 __pycache__/
 *.pyc
-.local/
-.config/
 instances/
 tmp/
+.local/
+.config/
+active_instances.json
