@@ -126,34 +126,44 @@ def stop_active_client():
 
 def ensure_client_running_for_qr():
     """未登录时，保证官方客户端运行以产出最新登录二维码"""
-    out = subprocess.check_output("pgrep -f 'clouddesktop-qml' || true", shell=True).strip()
-    if not out:
-        cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_login.log 2>&1 &'
-        subprocess.Popen(cmd, shell=True, executable="/bin/bash")
-        time.sleep(2)
+    try:
+        out = subprocess.check_output("pgrep -f 'clouddesktop-qml' || true", shell=True).strip()
+        if not out:
+            cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_login.log 2>&1 &'
+            subprocess.Popen(cmd, shell=True, executable="/bin/bash")
+            time.sleep(3)
+    except Exception:
+        pass
 
 def check_qr_from_logs():
-    """从官方客户端日志解析最新的扫码二维码 URL 并生成图片"""
+    """从官方客户端日志解析最新的扫码二维码 URL 并生成 Base64 图片"""
     today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
     if os.path.exists(today_log):
         try:
             with open(today_log, "r", encoding="utf-8", errors="ignore") as f:
-                c = f.read()
-            matches = re.findall(r'https://desk\.ctyun\.cn[^ "]+loginMode=1[^ "]*', c)
-            if matches:
-                url = matches[-1]
-                if url != STATE["qr_url"]:
-                    STATE["qr_url"] = url
-                    # 生成 base64 图片
-                    try:
-                        import base64
-                        png_path = "/tmp/web_qr.png"
-                        subprocess.run(f'qrencode -s 6 -o "{png_path}" "{url}"', shell=True)
-                        if os.path.exists(png_path):
-                            b64 = base64.b64encode(open(png_path, "rb").read()).decode()
-                            STATE["qr_img_base64"] = f"data:image/png;base64,{b64}"
-                    except Exception:
-                        pass
+                lines = f.readlines()
+            for line in reversed(lines):
+                if "登录二维码地址" in line or "login-confirm" in line:
+                    matches = re.findall(r'https://desk\.ctyun\.cn[^ "]+loginMode=1[^ "]*', line)
+                    if not matches:
+                        matches = re.findall(r'https://desk\.ctyun\.cn[^ "\'\r\n]+', line)
+                    if matches:
+                        url = matches[0].strip()
+                        if url != STATE["qr_url"] or not STATE["qr_img_base64"]:
+                            STATE["qr_url"] = url
+                            # 调用 qrencode CLI 生成图片
+                            try:
+                                import base64
+                                png_path = "/tmp/web_qr.png"
+                                subprocess.run(f'/usr/bin/qrencode -s 6 -o "{png_path}" "{url}"', shell=True)
+                                if os.path.exists(png_path):
+                                    with open(png_path, "rb") as bf:
+                                        b64 = base64.b64encode(bf.read()).decode()
+                                    STATE["qr_img_base64"] = f"data:image/png;base64,{b64}"
+                                    append_log("📱 已成功捕获并生成官方最新扫码二维码！")
+                            except Exception as ex:
+                                append_log(f"生成二维码图片异常: {ex}")
+                        break
         except Exception:
             pass
 
@@ -166,16 +176,16 @@ def round_robin_worker():
         # 1. 检查是否登录
         if not check_login_status():
             STATE["current_desktop"] = "⚠️ 等待手机扫码登录"
-            check_qr_from_logs()
             ensure_client_running_for_qr()
-            time.sleep(2)
+            check_qr_from_logs()
+            time.sleep(3)
             continue
 
         # 2. 检查是否有配置云电脑
         cfg = load_config()
         desktops = cfg.get("desktops", [])
         if not desktops:
-            STATE["current_desktop"] = "⚠️ 请在控制台添加云电脑设备ID"
+            STATE["current_desktop"] = "⚠️ 登录成功！请在上方添加云电脑设备ID"
             time.sleep(3)
             continue
             
@@ -209,7 +219,6 @@ def round_robin_worker():
                 if STATE["should_stop"]:
                     break
                 time.sleep(1)
-                check_qr_from_logs()
                 if os.path.exists(today_log):
                     try:
                         out = subprocess.check_output(f"tail -n 25 '{today_log}' || true", shell=True).decode('utf-8', errors='ignore')
@@ -239,7 +248,7 @@ def round_robin_worker():
     STATE["current_desktop"] = None
     append_log("⏹️ 轮询引擎已停止。")
 
-# HTML Web UI 模版 (二次元/暗色毛玻璃设计)
+# HTML Web UI 模版 (二次元/暗色毛玻璃设计，内置高容错在线二维码展示)
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -334,7 +343,7 @@ header {
   border-radius: 12px;
   margin-top: 10px;
 }
-.qr-box img { max-width: 180px; border-radius: 8px; border: 2px solid var(--border); }
+.qr-box img { max-width: 190px; border-radius: 8px; border: 2px solid var(--border); background: #fff; padding: 4px; }
 .qr-box a { color: var(--primary); font-size: 12px; text-decoration: none; word-break: break-all; display: block; margin-top: 8px; }
 
 .device-item {
@@ -403,9 +412,9 @@ header {
           <span>📱 手机扫码授权登录</span>
           <button class="btn btn-primary" style="padding: 4px 10px; font-size: 12px;" onclick="refreshQR()">刷新二维码</button>
         </div>
-        <p style="font-size: 12px; color: var(--text-muted);">打开天翼云电脑 App 或微信扫码确认登录：</p>
+        <p style="font-size: 12px; color: var(--text-muted);">使用天翼云电脑 App 或微信扫码确认登录：</p>
         <div class="qr-box">
-          <div id="qrPlaceholder" style="padding: 30px; font-size: 12px; color: var(--text-muted);">正在获取最新官方二维码...</div>
+          <div id="qrPlaceholder" style="padding: 30px; font-size: 12px; color: var(--text-muted);">正在生成最新官方二维码...</div>
           <img id="qrImg" src="" style="display: none;">
           <a id="qrLink" href="#" target="_blank" style="display: none;">🔗 手机直接打开网页授权</a>
         </div>
@@ -492,13 +501,21 @@ function fetchStatus() {
     }
     document.getElementById('roundCounter').innerText = '第 ' + data.round + ' 轮';
 
-    // 二维码展示
+    // 二维码展示（若后端已生成 Base64 则优先使用，否则用第三方 API 渲染）
+    const placeholder = document.getElementById('qrPlaceholder');
+    const img = document.getElementById('qrImg');
+    const link = document.getElementById('qrLink');
+
     if (data.qr_img_base64) {
-      document.getElementById('qrPlaceholder').style.display = 'none';
-      const img = document.getElementById('qrImg');
+      placeholder.style.display = 'none';
       img.src = data.qr_img_base64;
       img.style.display = 'inline-block';
-      const link = document.getElementById('qrLink');
+      link.href = data.qr_url;
+      link.style.display = 'block';
+    } else if (data.qr_url) {
+      placeholder.style.display = 'none';
+      img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=' + encodeURIComponent(data.qr_url);
+      img.style.display = 'inline-block';
       link.href = data.qr_url;
       link.style.display = 'block';
     }
@@ -583,8 +600,8 @@ function refreshQR() {
   });
 }
 
-setInterval(fetchStatus, 3000);
-setInterval(fetchLogs, 4000);
+setInterval(fetchStatus, 2500);
+setInterval(fetchLogs, 3000);
 fetchStatus();
 fetchLogs();
 </script>
@@ -693,6 +710,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "未知设备操作"}, 400)
 
         elif url.path == "/api/qr/refresh":
+            stop_active_client()
+            ensure_client_running_for_qr()
+            time.sleep(2)
             check_qr_from_logs()
             self._send_json({"success": True, "qr_url": STATE["qr_url"]})
         else:
