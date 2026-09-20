@@ -349,16 +349,9 @@ def round_robin_worker():
         cfg = load_config()
         desktops = cfg.get("desktops", [])
         
+        # 移除自动从历史 SQLite 强行填充，只有配置里真正有设备才连接
         if not desktops:
-            discovered = discover_desktops_from_db()
-            if discovered:
-                cfg["desktops"] = discovered
-                save_config(cfg)
-                desktops = discovered
-                append_log(f"🔍 自动从账号中检索到 {len(discovered)} 台云电脑，已载入轮询列表！")
-
-        if not desktops:
-            STATE["current_desktop"] = "⚠️ 登录成功！输入编码（如 D00...）添加设备"
+            STATE["current_desktop"] = "⚠️ 登录成功！请输入设备编码（如 D00...）添加设备"
             time.sleep(3)
             continue
             
@@ -683,6 +676,7 @@ header {
     <div style="display: flex; gap: 10px; align-items: center;">
       <span id="loginBadge" class="badge badge-warn">检查登录状态中...</span>
       <span id="statusBadge" class="badge badge-offline">未连接</span>
+      <button class="btn btn-primary" style="padding: 4px 10px; font-size: 12px;" onclick="forceNewLogin()">🔄 切换/重新登录</button>
       <button class="btn btn-danger" style="padding: 4px 10px; font-size: 12px;" onclick="logout()">锁定退出</button>
     </div>
   </header>
@@ -800,6 +794,17 @@ function verifyLogin() {
     } else {
       document.getElementById('pwdErr').style.display = 'block';
     }
+  });
+}
+
+function forceNewLogin() {
+  if (!confirm('确定要退出当前天翼云账号并重新生成登录二维码吗？')) return;
+  fetch('/api/auth/logout_ctyun', {
+    method: 'POST',
+    headers: { 'X-Auth-Token': authToken }
+  }).then(r => r.json()).then(d => {
+    alert('已清除当前账号，正在拉起官方客户端生成新二维码...');
+    fetchStatus();
   });
 }
 
@@ -1201,6 +1206,28 @@ class RequestHandler(BaseHTTPRequestHandler):
             cfg["desktops"] = desktops
             save_config(cfg)
             self._send_json({"success": True, "count": len(desktops), "added": added_cnt})
+
+        elif url.path == "/api/auth/logout_ctyun":
+            # 彻底清理官方客户端存储在 SQLite 中的登录凭据与会话
+            db_path = get_sqlite_path()
+            if db_path and os.path.exists(db_path):
+                try:
+                    conn = sqlite3.connect(db_path)
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM data WHERE name = 'crashAccountData'")
+                    cur.execute("DELETE FROM data WHERE name = 'advertiseUserAccount'")
+                    cur.execute("DELETE FROM data WHERE name LIKE '%lastConnectDesktopId%'")
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+            STATE["logged_in"] = False
+            STATE["user_account"] = ""
+            STATE["qr_url"] = ""
+            stop_active_client()
+            time.sleep(1)
+            force_generate_new_qr()
+            self._send_json({"success": True})
 
         elif url.path == "/api/qr/refresh":
             if not STATE["logged_in"]:
