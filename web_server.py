@@ -137,17 +137,54 @@ def check_login_status():
     try:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
+        
+        # 1. 尝试从 crashAccountData 获取
         cur.execute("SELECT value FROM data WHERE name = 'crashAccountData'")
         row = cur.fetchone()
-        conn.close()
         if row and row[0]:
-            acc_info = json.loads(row[0])
-            acc = acc_info.get("userAccount") or acc_info.get("email") or "已登录"
+            try:
+                acc_info = json.loads(row[0])
+                acc = acc_info.get("userAccount") or acc_info.get("email") or "已登录"
+                STATE["logged_in"] = True
+                STATE["user_account"] = str(acc)
+                conn.close()
+                return True
+            except Exception:
+                pass
+                
+        # 2. 尝试从 advertiseUserAccount 获取 (如 ydn_c_xxxx)
+        cur.execute("SELECT value FROM data WHERE name = 'advertiseUserAccount'")
+        row = cur.fetchone()
+        if row and row[0]:
+            val = str(row[0]).strip('"').strip("'")
+            if val and val != '""' and val != "null":
+                STATE["logged_in"] = True
+                STATE["user_account"] = val
+                conn.close()
+                return True
+
+        # 3. 尝试从 lastConnectDesktopId 前缀获取用户名 (如 ydn_c_xxx/lastConnectDesktopId)
+        cur.execute("SELECT name FROM data WHERE name LIKE '%lastConnectDesktopId%'")
+        rows = cur.fetchall()
+        if rows:
+            for r in rows:
+                k = r[0]
+                if "/" in k:
+                    user_part = k.split("/")[0]
+                    if user_part:
+                        STATE["logged_in"] = True
+                        STATE["user_account"] = user_part
+                        conn.close()
+                        return True
             STATE["logged_in"] = True
-            STATE["user_account"] = acc
+            STATE["user_account"] = "已登录账号"
+            conn.close()
             return True
-    except Exception:
+
+        conn.close()
+    except Exception as e:
         pass
+        
     STATE["logged_in"] = False
     STATE["user_account"] = ""
     return False
