@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 天翼云电脑 Clink 原生多设备轮询与 Web 安全控制台服务
-Web Dashboard with Admin Password Protection, QR Login & Clink Logs
+Web Dashboard with Admin Password Protection, Instant Live QR Refresh & Clink Logs
 """
 
 import os
@@ -25,7 +25,6 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 LOG_DIR = os.path.expanduser("~/.local/share/CtyunClouddeskPublic/Log")
 LOG_FILE = os.path.join(BASE_DIR, "robin.log")
 
-# 全局运行状态
 STATE = {
     "logged_in": False,
     "user_account": "",
@@ -36,19 +35,18 @@ STATE = {
     "engine_thread": None,
     "should_stop": False,
     "qr_url": "",
-    "qr_img_base64": ""
+    "qr_img_base64": "",
+    "qr_time": 0
 }
 
-# 默认基础配置 (默认登录密码: 123456)
 DEFAULT_CONFIG = {
     "port": 8572,
-    "admin_password": "admin",  # Web 登录保护密码
+    "admin_password": "admin",
     "stay_seconds": 35,
     "switch_gap": 3,
     "desktops": []
 }
 
-# 简单的 Session 认证 Token 缓存
 AUTH_TOKENS = set()
 
 def load_config():
@@ -132,15 +130,27 @@ def stop_active_client():
     subprocess.run("pkill -f 'Xvfb' 2>/dev/null || true", shell=True)
     time.sleep(1)
 
-def ensure_client_running_for_qr():
+def force_generate_new_qr():
+    """重启客户端获取真正崭新的官方二维码"""
+    stop_active_client()
+    time.sleep(1)
+    # 清空旧日志避免误读旧二维码
+    today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
     try:
-        out = subprocess.check_output("pgrep -f 'clouddesktop-qml' || true", shell=True).strip()
-        if not out:
-            cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_login.log 2>&1 &'
-            subprocess.Popen(cmd, shell=True, executable="/bin/bash")
-            time.sleep(3)
+        if os.path.exists(today_log):
+            os.remove(today_log)
     except Exception:
         pass
+
+    cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_login.log 2>&1 &'
+    subprocess.Popen(cmd, shell=True, executable="/bin/bash")
+    
+    # 等待 4 秒拉取全新二维码
+    for _ in range(8):
+        time.sleep(1)
+        check_qr_from_logs()
+        if STATE["qr_url"]:
+            break
 
 def check_qr_from_logs():
     today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
@@ -157,6 +167,7 @@ def check_qr_from_logs():
                         url = matches[0].strip()
                         if url != STATE["qr_url"] or not STATE["qr_img_base64"]:
                             STATE["qr_url"] = url
+                            STATE["qr_time"] = time.time()
                             try:
                                 import base64
                                 png_path = "/tmp/web_qr.png"
@@ -180,15 +191,19 @@ def round_robin_worker():
     while not STATE["should_stop"]:
         if not check_login_status():
             STATE["current_desktop"] = "⚠️ 等待手机扫码登录"
-            ensure_client_running_for_qr()
-            check_qr_from_logs()
+            # 检查客户端是否还在运行，若挂掉则自动重启
+            out = subprocess.check_output("pgrep -f 'clouddesktop-qml' || true", shell=True).strip()
+            if not out:
+                force_generate_new_qr()
+            else:
+                check_qr_from_logs()
             time.sleep(3)
             continue
 
         cfg = load_config()
         desktops = cfg.get("desktops", [])
         if not desktops:
-            STATE["current_desktop"] = "⚠️ 登录成功！请添加云电脑设备ID"
+            STATE["current_desktop"] = "⚠️ 登录成功！请在左侧添加云电脑设备ID"
             time.sleep(3)
             continue
             
@@ -248,7 +263,7 @@ def round_robin_worker():
     STATE["current_desktop"] = None
     append_log("⏹️ 轮询引擎已停止。")
 
-# HTML Web UI 模版 (内置密码保护验证弹层与修改密码)
+# 引入已完善的安全 UI 模版
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -389,7 +404,6 @@ header {
   line-height: 1.6;
 }
 
-/* 登录弹层 */
 #authModal {
   position: fixed; top: 0; left: 0; width: 100%; height: 100%;
   background: rgba(8, 9, 14, 0.85); backdrop-filter: blur(12px);
@@ -404,7 +418,6 @@ header {
 </head>
 <body>
 
-<!-- 访问密码验证弹窗 -->
 <div id="authModal" style="display: none;">
   <div class="login-card">
     <h2 style="color: var(--primary); font-size: 20px; margin-bottom: 8px;">🔐 管理访问验证</h2>
@@ -431,13 +444,11 @@ header {
   </header>
 
   <div class="grid">
-    <!-- 左侧控制面板 -->
     <div class="sidebar">
-      <!-- 手机扫码登录 -->
       <div class="card">
         <div class="card-header">
           <span>📱 手机扫码授权登录</span>
-          <button class="btn btn-primary" style="padding: 4px 10px; font-size: 12px;" onclick="refreshQR()">刷新二维码</button>
+          <button class="btn btn-primary" style="padding: 4px 10px; font-size: 12px;" onclick="refreshQR(true)">🔄 强制刷新二维码</button>
         </div>
         <p style="font-size: 12px; color: var(--text-muted);">使用天翼云电脑 App 或微信扫码确认登录：</p>
         <div class="qr-box">
@@ -447,7 +458,6 @@ header {
         </div>
       </div>
 
-      <!-- 控制面板 -->
       <div class="card">
         <div class="card-header">
           <span>🎮 轮询保活控制</span>
@@ -460,7 +470,6 @@ header {
         </div>
       </div>
 
-      <!-- 设备添加表单 -->
       <div class="card">
         <div class="card-header">
           <span>➕ 添加云电脑设备</span>
@@ -480,7 +489,6 @@ header {
         <button class="btn btn-primary" style="width: 100%; justify-content: center;" onclick="addDesktop()">添加到轮询队列</button>
       </div>
 
-      <!-- 修改访问密码 -->
       <div class="card">
         <div class="card-header">
           <span>🔑 安全设置 (修改Web密码)</span>
@@ -493,7 +501,6 @@ header {
       </div>
     </div>
 
-    <!-- 右侧设备列表与实时日志 -->
     <div class="main-content">
       <div class="card">
         <div class="card-header">
@@ -566,7 +573,6 @@ function fetchStatus() {
       if (!data) return;
       document.getElementById('authModal').style.display = 'none';
 
-      // 登录状态
       const lBadge = document.getElementById('loginBadge');
       if (data.logged_in) {
         lBadge.className = 'badge badge-online';
@@ -576,7 +582,6 @@ function fetchStatus() {
         lBadge.innerText = '▲ 未登录，请先微信/App扫码';
       }
 
-      // 运行状态
       const badge = document.getElementById('statusBadge');
       if (data.running) {
         badge.className = 'badge badge-online';
@@ -589,7 +594,6 @@ function fetchStatus() {
       }
       document.getElementById('roundCounter').innerText = '第 ' + data.round + ' 轮';
 
-      // 二维码展示
       const placeholder = document.getElementById('qrPlaceholder');
       const img = document.getElementById('qrImg');
       const link = document.getElementById('qrLink');
@@ -685,8 +689,14 @@ function removeDesktop(id) {
   }).then(() => fetchStatus());
 }
 
-function refreshQR() {
-  fetch('/api/qr/refresh', {method: 'POST', headers: getHeaders()}).then(() => {
+function refreshQR(manual) {
+  if (manual) {
+    document.getElementById('qrPlaceholder').style.display = 'block';
+    document.getElementById('qrPlaceholder').innerText = '正在向官方网关重新申请崭新二维码...';
+    document.getElementById('qrImg').style.display = 'none';
+    document.getElementById('qrLink').style.display = 'none';
+  }
+  fetch('/api/qr/refresh', {method: 'POST', headers: getHeaders()}).then(r => r.json()).then(res => {
     setTimeout(fetchStatus, 1500);
   });
 }
@@ -708,7 +718,6 @@ function changePassword() {
   });
 }
 
-// 初始化校验
 if (!authToken) {
   document.getElementById('authModal').style.display = 'flex';
 } else {
@@ -747,7 +756,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_html(HTML_PAGE)
             return
 
-        # 保护 API 需要 Token 认证
         if not self._is_authenticated():
             self._send_json({"error": "未登录或登录已过期", "need_auth": True}, 401)
             return
@@ -792,7 +800,6 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception:
             req_data = {}
 
-        # 1. Web 密码登录接口（无需预先带 Token）
         if url.path == "/api/auth/login":
             cfg = load_config()
             pwd = req_data.get("password", "")
@@ -805,7 +812,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "密码错误"}, 403)
             return
 
-        # 其他 POST API 需要验证访问 Token
         if not self._is_authenticated():
             self._send_json({"error": "未登录或登录已过期", "need_auth": True}, 401)
             return
@@ -818,7 +824,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             cfg = load_config()
             cfg["admin_password"] = new_pwd
             save_config(cfg)
-            AUTH_TOKENS.clear() # 清空所有旧登录凭据
+            AUTH_TOKENS.clear()
             self._send_json({"success": True, "message": "密码修改成功"})
 
         elif url.path == "/api/engine":
@@ -864,11 +870,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "未知设备操作"}, 400)
 
         elif url.path == "/api/qr/refresh":
-            stop_active_client()
-            ensure_client_running_for_qr()
-            time.sleep(2)
-            check_qr_from_logs()
-            self._send_json({"success": True, "qr_url": STATE["qr_url"]})
+            # 彻底重启官方进程生成崭新二维码
+            force_generate_new_qr()
+            self._send_json({"success": True, "qr_url": STATE["qr_url"], "qr_img_base64": STATE["qr_img_base64"]})
         else:
             self.send_error(404, "Not Found")
 
@@ -881,7 +885,6 @@ def main():
     server = HTTPServer(("0.0.0.0", port), RequestHandler)
     append_log(f"🌐 天翼云 Clink 原生多设备控制中心已启动！控制台端口: http://0.0.0.0:{port}")
     
-    # 自动在后台启动守护
     t = threading.Thread(target=round_robin_worker, daemon=True)
     t.start()
     STATE["engine_thread"] = t
