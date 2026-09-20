@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 天翼云电脑 Clink 原生多设备轮询与 Web 安全控制台服务
-Web Dashboard with Admin Password Protection, Smart QR Refresh & Clink Logs
+Web Dashboard with Auto-Discovery of Desktops, Code/ID Auto-Mapping & Instant Keepalive
 """
 
 import os
@@ -105,7 +105,58 @@ def check_login_status():
     STATE["user_account"] = ""
     return False
 
-def set_target_desktop_in_db(desktop_id, home_dir=None):
+def discover_desktops_from_db():
+    """自动从已登录的本地数据库扫描出云电脑设备列表"""
+    db_path = get_sqlite_path()
+    if not db_path or not os.path.exists(db_path):
+        return []
+    discovered = []
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT name, value FROM data WHERE name LIKE '%regionProperties%'")
+        rows = cur.fetchall()
+        for r in rows:
+            val_str = r[1]
+            try:
+                val = json.loads(val_str)
+                d_id = str(val.get("objId", "")).strip()
+                if d_id and d_id not in [d["id"] for d in discovered]:
+                    # 查找对应编码
+                    discovered.append({
+                        "id": d_id,
+                        "code": f"D00...{d_id}",
+                        "name": f"云电脑 ({d_id})"
+                    })
+            except Exception:
+                pass
+        conn.close()
+    except Exception:
+        pass
+    return discovered
+
+def parse_code_or_id(input_str):
+    """
+    智能解析用户输入的设备标识：
+    1. 纯数字: 如 23728443
+    2. 设备编码: 如 D0026090823728443 -> 提取末尾的实际数字ID (23728443)
+    """
+    s = str(input_str).strip()
+    if not s:
+        return "", ""
+    # 如果以 D 开头且较长 (如 D0026090823728443)
+    if s.upper().startswith("D") and len(s) >= 14:
+        # 天翼云编码规则: 前面为字母+日期/序列号，末尾 8 位为真实数字 ID
+        tail_id = re.search(r'\d{7,10}$', s)
+        if tail_id:
+            return tail_id.group(0), s
+        return s, s
+    # 如果纯数字
+    if s.isdigit():
+        return s, f"D...{s}"
+    return s, s
+
+def set_target_desktop_in_db(desktop_id, desktop_code="", home_dir=None):
     db_path = get_sqlite_path(home_dir)
     if not db_path:
         return False
@@ -115,7 +166,9 @@ def set_target_desktop_in_db(desktop_id, home_dir=None):
         cur.execute("SELECT name FROM data WHERE name LIKE '%lastConnectDesktopId%'")
         rows = cur.fetchall()
         for r in rows:
-            cur.execute("UPDATE data SET value = ? WHERE name = ?", (f'"{desktop_id}"', r[0]))
+            # 兼容数字 ID 与全编码写入
+            target_val = desktop_code if desktop_code and desktop_code.startswith("D") else desktop_id
+            cur.execute("UPDATE data SET value = ? WHERE name = ?", (f'"{target_val}"', r[0]))
         conn.commit()
         cur.execute("PRAGMA wal_checkpoint(FULL)")
         conn.close()
@@ -131,7 +184,6 @@ def stop_active_client():
     time.sleep(1)
 
 def force_generate_new_qr():
-    """仅在未登录且明确需要时才拉起生成二维码"""
     if check_login_status():
         return
     stop_active_client()
@@ -202,15 +254,24 @@ def round_robin_worker():
             time.sleep(3)
             continue
         else:
-            # 已经登录成功：清空二维码状态，彻底停止二维码刷新与生成
             STATE["qr_url"] = ""
             STATE["qr_img_base64"] = ""
 
         # 2. 检查是否有配置云电脑
         cfg = load_config()
         desktops = cfg.get("desktops", [])
+        
+        # 自动同步已发现的设备（如果列表为空）
         if not desktops:
-            STATE["current_desktop"] = "⚠️ 登录成功！请在左侧添加云电脑设备ID"
+            discovered = discover_desktops_from_db()
+            if discovered:
+                cfg["desktops"] = discovered
+                save_config(cfg)
+                desktops = discovered
+                append_log(f"🔍 自动从账号中检索到 {len(discovered)} 台云电脑，已载入轮询列表！")
+
+        if not desktops:
+            STATE["current_desktop"] = "⚠️ 登录成功！输入编码（如 D00...）添加设备"
             time.sleep(3)
             continue
             
@@ -229,8 +290,8 @@ def round_robin_worker():
             d_code = d.get("code", d_id)
             STATE["current_desktop"] = f"[{d_name}] ({d_code})"
             
-            append_log(f"[{idx}/{len(desktops)}] 正在连接: [{d_name}] (ID: {d_id} / {d_code})...")
-            set_target_desktop_in_db(d_id)
+            append_log(f"[{idx}/{len(desktops)}] 正在连接: [{d_name}] (编码: {d_code} / ID: {d_id})...")
+            set_target_desktop_in_db(d_id, d_code)
             
             stop_active_client()
             cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_runner.log 2>&1 &'
@@ -270,7 +331,6 @@ def round_robin_worker():
     STATE["current_desktop"] = None
     append_log("⏹️ 轮询引擎已停止。")
 
-# HTML Web UI 模版 (已登录自动隐藏二维码区域并展示绿色的账号授权卡片)
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -462,14 +522,12 @@ header {
 
   <div class="grid">
     <div class="sidebar">
-      <!-- 账号登录面板 (未登录时显示二维码，登录后自动显示已就绪) -->
       <div class="card" id="authSection">
         <div class="card-header">
           <span>📱 账号授权状态</span>
           <button id="btnRefreshQR" class="btn btn-primary" style="padding: 4px 10px; font-size: 12px;" onclick="refreshQR(true)">🔄 刷新二维码</button>
         </div>
         
-        <!-- 未登录展示区 -->
         <div id="qrContainer">
           <p style="font-size: 12px; color: var(--text-muted);">使用天翼云电脑 App 或微信扫码确认登录：</p>
           <div class="qr-box">
@@ -479,7 +537,6 @@ header {
           </div>
         </div>
 
-        <!-- 已登录展示区 -->
         <div id="loggedContainer" class="account-box" style="display: none;">
           <h3>✅ 账号已授权就绪</h3>
           <p id="loggedAccountText" style="margin-top: 4px; color: #fff;"></p>
@@ -500,21 +557,19 @@ header {
         </div>
       </div>
 
+      <!-- 设备添加表单 (强化支持：直接输入编码如 D0026090823728443) -->
       <div class="card">
         <div class="card-header">
           <span>➕ 添加云电脑设备</span>
+          <button class="btn btn-primary" style="padding: 2px 8px; font-size: 11px;" onclick="autoScanDesktops()">🔍 自动探测</button>
         </div>
         <div class="form-group">
-          <label>云电脑 ID (例如: 23798068)</label>
-          <input type="text" id="newId" class="form-control" placeholder="请输入数字ID">
+          <label>云电脑编码 或 数字ID</label>
+          <input type="text" id="newInput" class="form-control" placeholder="直接粘贴编码如: D0026090823728443">
         </div>
         <div class="form-group">
-          <label>机器名称备注</label>
-          <input type="text" id="newName" class="form-control" placeholder="如: 游戏版1号">
-        </div>
-        <div class="form-group">
-          <label>设备编码 (例如: D0026091923798068)</label>
-          <input type="text" id="newCode" class="form-control" placeholder="可选，便于区分">
+          <label>机器备注名称 (选填)</label>
+          <input type="text" id="newName" class="form-control" placeholder="如: 游戏版1号 (默认自动命名)">
         </div>
         <button class="btn btn-primary" style="width: 100%; justify-content: center;" onclick="addDesktop()">添加到轮询队列</button>
       </div>
@@ -611,8 +666,6 @@ function fetchStatus() {
       if (data.logged_in) {
         lBadge.className = 'badge badge-online';
         lBadge.innerText = '● 账号已登录: ' + data.user_account;
-        
-        // 核心优化：登录后彻底隐藏二维码区域与刷新按钮，显示已授权卡片
         qrContainer.style.display = 'none';
         btnRefresh.style.display = 'none';
         loggedContainer.style.display = 'block';
@@ -663,7 +716,7 @@ function renderDesktops(list, curr) {
   document.getElementById('devCount').innerText = list.length;
   const container = document.getElementById('deviceList');
   if (list.length === 0) {
-    container.innerHTML = '<p style="font-size: 13px; color: var(--text-muted); text-align: center; padding: 20px;">暂无云电脑，请在左侧添加</p>';
+    container.innerHTML = '<p style="font-size: 13px; color: var(--text-muted); text-align: center; padding: 20px;">暂无云电脑，请在左侧输入编码添加或点击自动探测</p>';
     return;
   }
   let html = '';
@@ -673,7 +726,7 @@ function renderDesktops(list, curr) {
       <div class="device-item ${isActive ? 'active' : ''}">
         <div class="device-info">
           <h4>${idx + 1}. ${d.name} ${isActive ? '<span style="color: var(--primary); font-size: 11px;">[正在串流]</span>' : ''}</h4>
-          <p>ID: ${d.id} · 编码: ${d.code || d.id}</p>
+          <p>编码: ${d.code} · ID: ${d.id}</p>
         </div>
         <button class="btn btn-danger" style="padding: 4px 8px; font-size: 12px;" onclick="removeDesktop('${d.id}')">移除</button>
       </div>
@@ -706,20 +759,29 @@ function toggleEngine(start) {
 }
 
 function addDesktop() {
-  const id = document.getElementById('newId').value.trim();
-  const name = document.getElementById('newName').value.trim() || '天翼云电脑';
-  const code = document.getElementById('newCode').value.trim() || id;
-  if (!id) { alert('请输入云电脑 ID'); return; }
+  const inputVal = document.getElementById('newInput').value.trim();
+  const name = document.getElementById('newName').value.trim();
+  if (!inputVal) { alert('请输入云电脑设备编码或数字ID'); return; }
   fetch('/api/desktops', {
     method: 'POST',
     headers: getHeaders(),
-    body: JSON.stringify({action: 'add', id, name, code})
+    body: JSON.stringify({action: 'add', input: inputVal, name})
   }).then(r => r.json()).then(res => {
     if (res.error) alert(res.error);
-    document.getElementById('newId').value = '';
+    document.getElementById('newInput').value = '';
     document.getElementById('newName').value = '';
-    document.getElementById('newCode').value = '';
     fetchStatus();
+  });
+}
+
+function autoScanDesktops() {
+  fetch('/api/desktops/scan', {method: 'POST', headers: getHeaders()}).then(r => r.json()).then(res => {
+    if (res.success) {
+      alert('探测完成！已载入 ' + res.count + ' 台设备');
+      fetchStatus();
+    } else {
+      alert('探测失败: ' + (res.error || '未找到设备'));
+    }
   });
 }
 
@@ -878,7 +940,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_json({"success": True, "message": "密码修改成功"})
 
         elif url.path == "/api/auth/clear_login":
-            # 清理登录缓存，允许重新扫码
             db_path = get_sqlite_path()
             if db_path and os.path.exists(db_path):
                 try:
@@ -915,15 +976,24 @@ class RequestHandler(BaseHTTPRequestHandler):
             desktops = cfg.get("desktops", [])
             
             if action == "add":
-                new_id = str(req_data.get("id", "")).strip()
-                new_name = str(req_data.get("name", "云电脑")).strip()
-                new_code = str(req_data.get("code", new_id)).strip()
+                # 支持用户直接输入编码 D00... 或纯数字
+                raw_input = str(req_data.get("input", req_data.get("id", ""))).strip()
+                parsed_id, parsed_code = parse_code_or_id(raw_input)
                 
-                if any(str(d.get("id")) == new_id for d in desktops):
-                    self._send_json({"error": f"云电脑 ID [{new_id}] 已经在列表中"}, 400)
+                if not parsed_id:
+                    self._send_json({"error": "请输入有效的云电脑编码或ID"}, 400)
+                    return
+
+                name = str(req_data.get("name", "")).strip()
+                if not name:
+                    name = f"云电脑 {parsed_id}"
+                
+                # 查重
+                if any(str(d.get("id")) == parsed_id or str(d.get("code")) == parsed_code for d in desktops):
+                    self._send_json({"error": f"设备 [{parsed_code}] 已经在列表中"}, 400)
                     return
                     
-                desktops.append({"id": new_id, "name": new_name, "code": new_code})
+                desktops.append({"id": parsed_id, "name": name, "code": parsed_code})
                 cfg["desktops"] = desktops
                 save_config(cfg)
                 self._send_json({"success": True, "desktops": desktops})
@@ -935,6 +1005,19 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"success": True, "desktops": cfg["desktops"]})
             else:
                 self._send_json({"error": "未知设备操作"}, 400)
+
+        elif url.path == "/api/desktops/scan":
+            discovered = discover_desktops_from_db()
+            cfg = load_config()
+            desktops = cfg.get("desktops", [])
+            added_cnt = 0
+            for d in discovered:
+                if not any(str(x.get("id")) == d["id"] for x in desktops):
+                    desktops.append(d)
+                    added_cnt += 1
+            cfg["desktops"] = desktops
+            save_config(cfg)
+            self._send_json({"success": True, "count": len(desktops), "added": added_cnt})
 
         elif url.path == "/api/qr/refresh":
             if not STATE["logged_in"]:
