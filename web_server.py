@@ -143,31 +143,50 @@ def check_login_status():
     return False
 
 def discover_desktops_from_db():
-    db_path = get_sqlite_path()
-    if not db_path or not os.path.exists(db_path):
-        return []
     discovered = []
-    try:
-        conn = sqlite3.connect(db_path)
-        cur = conn.cursor()
-        cur.execute("SELECT name, value FROM data WHERE name LIKE '%regionProperties%'")
-        rows = cur.fetchall()
-        for r in rows:
-            val_str = r[1]
-            try:
-                val = json.loads(val_str)
-                d_id = str(val.get("objId", "")).strip()
-                if d_id and d_id not in [d["id"] for d in discovered]:
-                    discovered.append({
-                        "id": d_id,
-                        "code": f"D00...{d_id}",
-                        "name": f"云电脑 ({d_id})"
-                    })
-            except Exception:
-                pass
-        conn.close()
-    except Exception:
-        pass
+    seen = set()
+
+    # 1. 优先扫描官方客户端运行日志 (包含完整云电脑名称与objId)
+    log_files = glob.glob(os.path.join(LOG_DIR, "*.log"))
+    for fn in log_files:
+        try:
+            with open(fn, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    if "resolveNormalDesktop" in line or "首页加载桌面列表" in line or "pageDesktop" in line:
+                        matches = re.findall(r'"objId":"(\d+)".*?"objName":"([^"]+)"', line)
+                        for did, dname in matches:
+                            if did not in seen:
+                                seen.add(did)
+                                discovered.append({
+                                    "id": did,
+                                    "code": f"D00...{did}",
+                                    "name": f"{dname} ({did})"
+                                })
+        except Exception:
+            pass
+
+    # 2. 从本地 SQLite 数据库扫描补充
+    db_path = get_sqlite_path()
+    if db_path and os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT name, value FROM data WHERE name LIKE '%regionProperties%' OR name LIKE '%lastConnectDesktopId%'")
+            rows = cur.fetchall()
+            for r in rows:
+                val_str = str(r[1])
+                ids = re.findall(r'(\d{7,10})', val_str)
+                for did in ids:
+                    if did not in seen:
+                        seen.add(did)
+                        discovered.append({
+                            "id": did,
+                            "code": f"D00...{did}",
+                            "name": f"天翼云电脑 ({did})"
+                        })
+            conn.close()
+        except Exception:
+            pass
     return discovered
 
 def parse_code_or_id(input_str):
