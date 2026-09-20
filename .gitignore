@@ -1,0 +1,9 @@
+bin/
+*.deb
+*.log
+__pycache__/
+*.pyc
+.local/
+.config/
+instances/
+tmp/
