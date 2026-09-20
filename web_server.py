@@ -213,51 +213,23 @@ def stop_active_client():
         subprocess.run("pkill -f 'Xvfb' 2>/dev/null || true", shell=True)
     time.sleep(1)
 
-def request_official_qr_direct():
-    """直通官方网关 API 申请二维码 (不依赖任何本地客户端)"""
-    url = "https://desk.ctyun.cn:8810/api/auth/client/qrCode/genData"
-    headers = {
-        "Content-Type": "application/json",
-        "CTG-DEVICECODE": "00:11:22:33:44:55",
-        "CTG-DEVICETYPE": "1" if IS_WINDOWS else "11",
-        "CTG-REQUESTID": str(int(time.time()*1000)),
-        "CTG-TIMESTAMP": str(int(time.time()*1000)),
-        "CTG-VERSION": "204010003",
-        "CTG-APPMODEL": "2",
-        "CTG-APPCHANNEL": "1020700",
-        "CTG-DEVICE-MODEL": "windows" if IS_WINDOWS else "linux",
-        "x-product-id": "7"
-    }
-    data = json.dumps({"version": 3}).encode()
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            res = json.loads(resp.read().decode())
-            qr_id = res["data"]["qrCodeId"]
-            qr_link = f"https://desk.ctyun.cn:443/selforder/#/login-confirm?qrCodeId={qr_id}&loginMode=1&showAutoLoginFlag=1"
-            STATE["qr_id"] = qr_id
-            STATE["qr_url"] = qr_link
-            STATE["qr_time"] = time.time()
-            # 生成纯前端渲染支持
-            append_log(f"📱 直连官方 API 成功生成二维码: {qr_id[:16]}...")
-            return True
-    except Exception as e:
-        append_log(f"直连二维码 API 异常: {e}")
-        return False
-
 def force_generate_new_qr():
     if check_login_status():
         return
-    # 优先使用直通 API 毫秒级生成 (Windows/Linux 均支持，无需拉起任何进程)
-    if request_official_qr_direct():
-        return
-    # 备用回退: 本地客户端拉取
     stop_active_client()
     time.sleep(1)
+    
+    today_log = os.path.join(LOG_DIR, f"{time.strftime('%Y-%m-%d')}.log")
+    try:
+        if os.path.exists(today_log):
+            os.remove(today_log)
+    except Exception:
+        pass
+
     if not IS_WINDOWS:
         cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_login.log 2>&1 &'
         subprocess.Popen(cmd, shell=True, executable="/bin/bash")
-        for _ in range(6):
+        for _ in range(12):
             time.sleep(1)
             check_qr_from_logs()
             if STATE["qr_url"]:
@@ -266,9 +238,23 @@ def force_generate_new_qr():
 def check_qr_from_logs():
     if STATE["logged_in"]:
         return
-    # 若二维码超过 90 秒自动刷新
-    if not STATE["qr_url"] or (time.time() - STATE.get("qr_time", 0) > 90):
-        request_official_qr_direct()
+    today_log = os.path.join(LOG_DIR, f"{time.strftime('%Y-%m-%d')}.log")
+    if os.path.exists(today_log):
+        try:
+            with open(today_log, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            for line in reversed(lines):
+                if "登录二维码地址" in line or "login-confirm" in line:
+                    matches = re.findall(r'https://desk\.ctyun\.cn[^ "\'\r\n]+', line)
+                    if matches:
+                        url = matches[0].strip()
+                        if url != STATE["qr_url"]:
+                            STATE["qr_url"] = url
+                            STATE["qr_time"] = time.time()
+                            append_log("📱 成功捕获官方原生客户端最新登录二维码！")
+                        break
+        except Exception:
+            pass
 
 def round_robin_worker():
     append_log(f"🚀 官方 Clink / QUIC 原生多设备轮询引擎已就绪！(运行平台: {'Windows' if IS_WINDOWS else 'Linux'})")
