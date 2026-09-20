@@ -1,96 +1,107 @@
-# 天翼云电脑 Linux 原生多设备轮询保活控制中心 (Docker 版)
+# 天翼云电脑 Linux 原生无头持久保活控制中心
 
-基于天翼云官方 Linux 原生视讯串流内核（**Clink / QUIC RFC 9000**）构建的高性能、超轻量无头多设备轮询保活系统。
+基于天翼云官方 Linux 原生视讯串流内核（**Clink / RFC 9000 QUIC**）构建的高性能、超轻量常驻保活系统。
 
----
-
-## 🌟 为什么用 Docker 部署最好？
-
-> 当前默认模式已经改为 **持久在线 (`continuous`)**：每个 Docker 容器绑定一台云电脑，真实 Clink 串流连接成功后不再主动断开。多台机器请分别启动多个容器，不再依赖 35 秒轮询。
-
-1. **零环境依赖与秒级拉起**：
-   - 内部已装齐轻量无头虚拟屏幕 `Xvfb`、XCB、音频驱动及天翼云官方 Linux 原生动态库；
-   - 宿主机不需要安装任何依赖库，任何 Linux 服务器（Ubuntu/Debian/CentOS/Alpine）装好 Docker 就能一键跑起来。
-2. **多账号多开彻底天然物理隔离**：
-   - 每个 Docker 容器就是一个纯净的独立系统，拥有完全隔离的 `HOME` 数据卷与网络端口；
-   - **彻底解决多开账号间进程抢占、日志串线和数据库互相污染的问题**！
-3. **极低资源开销**：
-   - 单容器常驻内存仅约 `150MB`，CPU 占用极低，1核1G VPS 也能轻松多开几个容器。
+彻底解决天翼云电脑（游戏版 5 分钟 / 普通版 10 分钟）闲置超时自动关机的问题。
 
 ---
 
-## 🚀 极速部署使用 (Docker CLI / Docker Compose)
+## 🌟 核心特性
 
-### 方式一：Docker 一键单行命令（最快）
+1. **真实视讯串流（彻底杜绝关机）**：
+   - 区别于仅调用网页 HTTP API 假在线，本项目直接拉起官方原生客户端并建立真实的 QUIC/UDP 28011 视讯通道，向机房网关上报活跃。
+2. **持久在线模式（不再 35 秒轮询断开）**：
+   - 连接成功后持续保持视讯连接，绝不主动退出重连，网络波动或进程异常时自动恢复。
+3. **Web 可视化控制台**：
+   - 现代化磨砂玻璃暗黑风 UI。
+   - 官方直链扫码登录、授权状态实时感知。
+   - 设备自动扫描（精准动态解析机房最新分配的 8 位数字 ID 与设备编码）。
+   - 实时滚动日志监控与安全密码防护（默认密码：`admin`）。
+4. **原生极轻量占用**：
+   - 无头 Xvfb 虚拟屏幕驱动，无需安装桌面环境（GNOME/KDE），单实例仅占约 200MB~300MB 内存。
 
-#### 启动主账号（端口 8572）：
+---
+
+## 🚀 快速开始 (Linux 服务器一键部署)
+
+### 1. 克隆仓库与初始化环境
 ```bash
-docker run -d \
-  --name ctyun-acc1 \
-  --restart always \
-  -p 8572:8572 \
-  -v /opt/ctyun/acc1/home:/root \
-  -e TZ=Asia/Shanghai \
-  lusean23/ctyun-libclink-jni:latest
+git clone https://github.com/maoaceo/ctyun-libclink-jni.git
+cd ctyun-libclink-jni
+chmod +x setup.sh web_server.py CtyunStart clouddesktop-qml
+./setup.sh
+```
+> `setup.sh` 会自动安装无头虚拟屏幕 `Xvfb`、XCB、音频驱动，并自动解压组装还原大体积核心动态库。
+
+### 2. 启动 Web 控制中心
+```bash
+python3 web_server.py
+```
+若需后台常驻运行：
+```bash
+nohup python3 web_server.py > web.log 2>&1 &
 ```
 
-#### 多开第二个账号（只需改个容器名和端口 8573）：
-```bash
-docker run -d \
-  --name ctyun-acc2 \
-  --restart always \
-  -p 8573:8572 \
-  -v /opt/ctyun/acc2/home:/root \
-  -e TZ=Asia/Shanghai \
-  lusean23/ctyun-libclink-jni:latest
-```
+打开浏览器访问：`http://你的服务器IP:8572`（默认访问密码：`admin`）。
 
 ---
 
-### 方式二：Docker Compose 统一编排多开（最方便管理）
+## 📱 使用步骤
 
-创建 `docker-compose.yml`：
-```yaml
-version: '3.8'
-
-services:
-  # 账号 1 (端口 8572)
-  ctyun-acc1:
-    image: lusean23/ctyun-libclink-jni:latest
-    container_name: ctyun-acc1
-    restart: always
-    ports:
-      - "8572:8572"
-    volumes:
-      - ./data/acc1/home:/root
-    environment:
-      - TZ=Asia/Shanghai
-
-  # 账号 2 (多开实例，端口 8573)
-  ctyun-acc2:
-    image: lusean23/ctyun-libclink-jni:latest
-    container_name: ctyun-acc2
-    restart: always
-    ports:
-      - "8573:8572"
-    volumes:
-      - ./data/acc2/home:/root
-    environment:
-      - TZ=Asia/Shanghai
-```
-
-启动命令：
-```bash
-docker compose up -d
-```
+1. **扫码登录**：打开控制台，使用天翼云电脑手机 App / 微信扫码，授权成功后界面自动显示绿色已登录。
+2. **扫描设备**：点击页面中的 **【🔍 自动探测】**，系统会自动读取机房返回的设备编码（如 `D002609...`）并绑定到保活任务。
+3. **保持运行**：设备添加后，系统会自动拉起底层串流核心并打印 `✅ 真实 Clink 视讯串流已连通`，随后一直保持连接，安心挂机！
 
 ---
 
-## 📱 使用指南
+## 👥 多账号 / 多设备多开指南
 
-1. **打开控制面板**：
-   - 账号 1 面板：`http://你的服务器IP:8572` (默认密码: `admin`)
-   - 账号 2 面板：`http://你的服务器IP:8573` (默认密码: `admin`)
-2. **手机微信/App 扫码**：各自面板独立出码，扫码授权成功后自动闭环，进入常驻保活状态；
-3. **添加设备与探测**：点击 **【🔍 自动探测】** 或直接粘贴设备编码（`D00...`）；
-4. **持久在线**：每个容器只负责一台设备；Clink 视讯串流一旦连通便持续保持，客户端异常退出时自动重连，不再按 35 秒主动断开！
+为保证连接稳定性，建议**一个实例保持连接一台云电脑**。如果拥有多个云电脑或账号，推荐使用多实例隔离运行：
+
+```bash
+# 账号 1 (默认端口 8572)
+python3 web_server.py
+
+# 账号 2 (多开实例，指定端口 8573 与独立数据目录)
+python3 multi_instance.py start acc2 8573
+
+# 账号 3 (多开实例，指定端口 8574)
+python3 multi_instance.py start acc3 8574
+```
+
+每个实例拥有完全隔离的 Session、配置与日志，分别访问对应端口即可独立扫码与保活。
+
+---
+
+## ⚙️ 配置文件说明 (`config.json`)
+
+```json
+{
+  "port": 8572,
+  "admin_password": "admin",
+  "keepalive_mode": "continuous",
+  "desktops": [
+    {
+      "id": "23794229",
+      "code": "D0026091823794229",
+      "name": "天翼云电脑游戏版"
+    }
+  ]
+}
+```
+- `keepalive_mode`：保活模式，默认为 `continuous`（持久在线保持，不主动断开）。
+
+---
+
+## 📋 常用管理命令
+
+```bash
+# 查看实时保活日志
+tail -f robin.log
+
+# 检查当前客户端运行状态
+ps aux | grep clouddesktop-qml
+
+# 停止保活服务
+pkill -f web_server.py && pkill -f clouddesktop-qml
+```
