@@ -174,13 +174,13 @@ def parse_code_or_id(input_str):
     s = str(input_str).strip()
     if not s:
         return "", ""
-    if s.upper().startswith("D") and len(s) >= 14:
-        tail_id = re.search(r'\d{7,10}$', s)
-        if tail_id:
-            return tail_id.group(0), s
-        return s, s
-    if s.isdigit():
-        return s, f"D...{s}"
+    m_code = re.search(r'(D\d{14,16})', s, re.I)
+    if m_code:
+        full_code = m_code.group(1)
+        return full_code[-8:], full_code
+    m_num = re.search(r'\b(\d{7,10})\b', s)
+    if m_num:
+        return m_num.group(1), f"D...{m_num.group(1)}"
     return s, s
 
 def set_target_desktop_in_db(desktop_id, desktop_code=""):
@@ -192,9 +192,9 @@ def set_target_desktop_in_db(desktop_id, desktop_code=""):
         cur = conn.cursor()
         cur.execute("SELECT name FROM data WHERE name LIKE '%lastConnectDesktopId%'")
         rows = cur.fetchall()
+        real_num_id = desktop_id[-8:] if len(desktop_id) >= 8 and desktop_id[-8:].isdigit() else desktop_id
         for r in rows:
-            target_val = desktop_code if desktop_code and desktop_code.startswith("D") else desktop_id
-            cur.execute("UPDATE data SET value = ? WHERE name = ?", (f'"{target_val}"', r[0]))
+            cur.execute("UPDATE data SET value = ? WHERE name = ?", (f'"{real_num_id}"', r[0]))
         conn.commit()
         cur.execute("PRAGMA wal_checkpoint(FULL)")
         conn.close()
