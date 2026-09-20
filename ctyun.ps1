@@ -1,129 +1,132 @@
 # ==============================================================================
-# 天翼云电脑 多设备轻量自动轮询保活脚本 (PowerShell 原生版)
+# 天翼云电脑 Windows 原生多设备自动轮询保活脚本 (直链即开即用版)
+# 使用方式: irm https://win.xaitr.com/sub/ctyun.ps1 | iex
 # ==============================================================================
 
-# 1. 基础配置
-$StaySeconds   = 35   # 每台云电脑串流保持秒数 (足以重置官方5分钟关机计时器)
-$SwitchSeconds = 3    # 切换间隔 (秒)
+# ----------------- 用户自定义配置区 -----------------
+$StaySeconds   = 35   # 每台机器视讯串流保持秒数 (重置官方5分钟关机计时器)
+$SwitchSeconds = 3    # 切换下一台机器的间隔 (秒)
 
-# 轮询设备列表 (在此填入你的云电脑数字 ID 与备注名称)
+# 待轮询保活的云电脑设备列表 (按需增减)
 $Desktops = @(
     @{ Id = "23798068"; Name = "游戏版1号"; Code = "D0026091923798068" }
     # @{ Id = "23798069"; Name = "游戏版2号"; Code = "D0026091923798069" }
     # @{ Id = "23798070"; Name = "尊享版3号"; Code = "D0026091923798070" }
 )
+# ----------------------------------------------------
 
-Write-Host "================================================================" -ForegroundColor Cyan
-Write-Host "🚀 天翼云电脑官方原生多设备轮询保活已启动 (Windows PowerShell)" -ForegroundColor Cyan
-Write-Host " - 轮询设备总数: $($Desktops.Count) 台" -ForegroundColor Gray
-Write-Host " - 单台串流保持: $StaySeconds 秒" -ForegroundColor Gray
-Write-Host " - 5台完整周期: 约 $($Desktops.Count * ($StaySeconds + $SwitchSeconds + 5)) 秒 (远低于300秒关机门槛)" -ForegroundColor Gray
+Write-Host "`n================================================================" -ForegroundColor Cyan
+Write-Host "🚀 天翼云电脑多设备【轮询防关机】脚本 (Windows 原生)" -ForegroundColor Cyan
+Write-Host " - 待轮询设备: $($Desktops.Count) 台" -ForegroundColor Gray
+Write-Host " - 单台握手保持: $StaySeconds 秒" -ForegroundColor Gray
+Write-Host " - 5台完整轮询周期: 约 $($Desktops.Count * ($StaySeconds + $SwitchSeconds + 5)) 秒 (远低于300秒关机倒计时)" -ForegroundColor Gray
 Write-Host "================================================================" -ForegroundColor Cyan
 
-# 2. 定位官方客户端程序路径
+# 1. 自动定位官方客户端主程序
 $ClientExe = ""
 $PossiblePaths = @(
     "C:\Program Files (x86)\CtyunClouddeskPublic\clouddesktop-qml.exe",
     "C:\Program Files\CtyunClouddeskPublic\clouddesktop-qml.exe",
+    "$env:ProgramFiles(x86)\CtyunClouddeskPublic\clouddesktop-qml.exe",
+    "$env:ProgramFiles\CtyunClouddeskPublic\clouddesktop-qml.exe",
     "$env:LOCALAPPDATA\Programs\CtyunClouddeskPublic\clouddesktop-qml.exe",
-    "$env:APPDATA\CtyunClouddeskPublic\clouddesktop-qml.exe"
+    "$env:APPDATA\CtyunClouddeskPublic\clouddesktop-qml.exe",
+    "D:\Program Files (x86)\CtyunClouddeskPublic\clouddesktop-qml.exe",
+    "D:\Program Files\CtyunClouddeskPublic\clouddesktop-qml.exe"
 )
 
-foreach ($path in $PossiblePaths) {
-    if (Test-Path $path) {
-        $ClientExe = $path
+foreach ($p in $PossiblePaths) {
+    if (Test-Path $p) {
+        $ClientExe = $p
         break
     }
 }
 
 if (-not $ClientExe) {
-    # 尝试从已安装服务或运行进程查找
-    $RunningProc = Get-Process -Name "clouddesktop-qml" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($RunningProc) {
-        $ClientExe = $RunningProc.Path
-    }
+    $proc = Get-Process -Name "clouddesktop-qml" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($proc) { $ClientExe = $proc.Path }
 }
 
 if (-not $ClientExe) {
-    Write-Host "[X] 未检测到官方天翼云电脑客户端！" -ForegroundColor Red
-    Write-Host "    请确认已安装天翼云电脑官方客户端，或检查安装目录。" -ForegroundColor Yellow
-    exit 1
+    Write-Host "[X] 未检测到官方客户端安装目录！" -ForegroundColor Red
+    Write-Host "    请确认已安装天翼云电脑官方 Windows 客户端。" -ForegroundColor Yellow
+    return
 }
 
-Write-Host "[*] 成功定位官方客户端: $ClientExe" -ForegroundColor Green
+Write-Host "[+] 官方客户端: $ClientExe" -ForegroundColor Green
 
-# 3. 定位本地离线 SQLite 数据库
+# 2. 定位本地离线配置数据库
 $DbDir = "$env:LOCALAPPDATA\CtyunClouddeskPublic\QML\OfflineStorage\Databases"
 $SqliteFile = Get-ChildItem -Path $DbDir -Filter "*.sqlite" -ErrorAction SilentlyContinue | Select-Object -First 1
 
 if (-not $SqliteFile) {
-    Write-Host "[X] 未找到客户端本地数据库文件，请先在官方客户端登录一次账号！" -ForegroundColor Red
-    exit 1
+    Write-Host "[X] 未找到客户端本地数据库文件，请先在官方客户端上登录一次你的账号！" -ForegroundColor Red
+    return
 }
 
 $DbPath = $SqliteFile.FullName
-Write-Host "[*] 本地配置数据库: $DbPath" -ForegroundColor Green
+Write-Host "[+] 本地数据库: $DbPath" -ForegroundColor Green
 
-# 4. 函数：平滑结束当前运行的客户端进程
-function Stop-CtyunClient {
+# 3. 停止当前运行的客户端进程
+function Stop-CtyunProcesses {
     Stop-Process -Name "clouddesktop-qml" -Force -ErrorAction SilentlyContinue
     Stop-Process -Name "clouddesktop-daemon" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 }
 
-# 5. 函数：更新目标机器 ID (PowerShell 原生轻量二进制/纯文本补丁方式，无需安装 sqlite3.exe)
-function Set-TargetDesktopId([string]$TargetId) {
-    $PyCmd = Get-Command "python" -ErrorAction SilentlyContinue
-    if ($PyCmd) {
+# 4. 原生平滑修改本地目标设备 ID (兼容 SQLite 数据库无额外依赖)
+function Set-CurrentDesktopId([string]$TargetId) {
+    # 优先 Python (如有)
+    $hasPy = Get-Command "python" -ErrorAction SilentlyContinue
+    if ($hasPy) {
         python -c "import sqlite3; conn = sqlite3.connect(r'$DbPath'); cur = conn.cursor(); cur.execute('SELECT name FROM data WHERE name LIKE \"%lastConnectDesktopId%\"'); [cur.execute('UPDATE data SET value = ? WHERE name = ?', ('\"$TargetId\"', r[0])) for r in cur.fetchall()]; conn.commit(); conn.close()" 2>$null
         return
     }
 
+    # 原生二进制正则匹配替换 SQLite 键值
     try {
-        $Bytes = [System.IO.File]::ReadAllBytes($DbPath)
-        $Text = [System.Text.Encoding]::UTF8.GetString($Bytes)
-        if ($Text -match 'lastConnectDesktopId"(\d+)"') {
-            $OldId = $matches[1]
-            if ($OldId -ne $TargetId) {
-                $NewText = $Text.Replace("lastConnectDesktopId`"$OldId`"", "lastConnectDesktopId`"$TargetId`"")
-                [System.IO.File]::WriteAllBytes($DbPath, [System.Text.Encoding]::UTF8.GetBytes($NewText))
+        $bytes = [System.IO.File]::ReadAllBytes($DbPath)
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+        if ($text -match 'lastConnectDesktopId"(\d+)"') {
+            $oldId = $matches[1]
+            if ($oldId -ne $TargetId) {
+                $newText = $text.Replace("lastConnectDesktopId`"$oldId`"", "lastConnectDesktopId`"$TargetId`"")
+                [System.IO.File]::WriteAllBytes($DbPath, [System.Text.Encoding]::UTF8.GetBytes($newText))
             }
         }
-    } catch {
-        # 忽略并发写入异常
-    }
+    } catch {}
 }
 
-# 6. 主轮询循环
+# 5. 主轮询守护
 $Round = 1
 while ($true) {
     Write-Host "`n🔄 === 开始第 $Round 轮多设备保活巡检 ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) ===" -ForegroundColor Yellow
     
     for ($i = 0; $i -lt $Desktops.Count; $i++) {
-        $Desktop = $Desktops[$i]
-        $DId = $Desktop.Id
-        $DName = $Desktop.Name
-        $DCode = $Desktop.Code
+        $dev = $Desktops[$i]
+        $dId = $dev.Id
+        $dName = $dev.Name
+        $dCode = $dev.Code
 
-        Write-Host "[$($i + 1)/$($Desktops.Count)] 正在切换至: [$DName] (编码: $DCode / ID: $DId)..." -ForegroundColor White
+        Write-Host "[$($i + 1)/$($Desktops.Count)] 正在切换至机器: [$dName] (ID: $dId | 编码: $dCode)..." -ForegroundColor White
         
-        # 写入目标设备 ID
-        Set-TargetDesktopId -TargetId $DId
+        # 写入本次要连接的目标机器 ID
+        Set-CurrentDesktopId -TargetId $dId
         
-        # 启动官方客户端进行视讯握手
-        Stop-CtyunClient
+        # 启动官方客户端进行 Clink/QUIC 握手
+        Stop-CtyunProcesses
         Start-Process -FilePath $ClientExe -WindowStyle Minimized -ErrorAction SilentlyContinue
         
-        Write-Host "  -> 🟢 视讯串流通道连接中，保持 $StaySeconds 秒以激活机房在线状态..." -ForegroundColor Green
+        Write-Host "  -> 🟢 视讯串流已建立！保持连接 $StaySeconds 秒以激活机房在线状态..." -ForegroundColor Green
         Start-Sleep -Seconds $StaySeconds
         
-        # 串流保持完毕，平滑关闭，重置机房 5 分钟闲置倒计时
-        Stop-CtyunClient
-        Write-Host "  -> ✨ [$DName] 保活成功！已刷新官方机房倒计时。" -ForegroundColor Cyan
+        # 握手完成，平滑关闭，彻底重置机房 5 分钟闲置倒计时
+        Stop-CtyunProcesses
+        Write-Host "  -> ✨ [$dName] 闲置关机倒计时已重置！准备轮换下一台..." -ForegroundColor Cyan
         
         Start-Sleep -Seconds $SwitchSeconds
     }
     
     $Round++
-    Write-Host "✨ 本轮所有设备均已完成保活握手！正在进入下一轮..." -ForegroundColor Green
+    Write-Host "✨ 本轮全部机器均已完成激活保活！正在进入下一轮..." -ForegroundColor Green
 }
