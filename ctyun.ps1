@@ -1,5 +1,5 @@
 # ==============================================================================
-# 天翼云电脑 Windows 原生多设备自动轮询保活脚本 (开机自启与静默守护版)
+# 天翼云电脑 Windows 原生多设备自动轮询保活脚本 (自动启动客户端扫码版)
 # 使用方式: irm https://win.xaitr.com/sub/ctyun.ps1 | iex
 # ==============================================================================
 
@@ -37,7 +37,7 @@ function Enable-StartupTask {
 Enable-StartupTask
 
 Write-Host "`n================================================================" -ForegroundColor Cyan
-Write-Host "🚀 天翼云电脑多设备【轮询防关机】脚本 (Windows 原生开机自启)" -ForegroundColor Cyan
+Write-Host "🚀 天翼云电脑多设备【轮询防关机】脚本 (Windows 原生扫码就绪)" -ForegroundColor Cyan
 Write-Host " - 待轮询设备: $($Desktops.Count) 台" -ForegroundColor Gray
 Write-Host " - 单台握手保持: $StaySeconds 秒" -ForegroundColor Gray
 Write-Host " - 5台完整轮询周期: 约 $($Desktops.Count * ($StaySeconds + $SwitchSeconds + 5)) 秒 (远低于300秒关机倒计时)" -ForegroundColor Gray
@@ -75,48 +75,78 @@ if (-not $ClientExe) {
 
 Write-Host "[+] 官方客户端: $ClientExe" -ForegroundColor Green
 
-# 2. 全盘精准搜索本地离线配置数据库 (*.sqlite)
-$DbPath = ""
-$PossibleDbPaths = @(
-    "$env:LOCALAPPDATA\CtyunClouddeskPublic\QML\OfflineStorage\Databases\*.sqlite",
-    "$env:APPDATA\CtyunClouddeskPublic\QML\OfflineStorage\Databases\*.sqlite",
-    "$env:USERPROFILE\.local\share\CtyunClouddeskPublic\QML\OfflineStorage\Databases\*.sqlite",
-    "$env:LOCALAPPDATA\Ctyun*\*.sqlite",
-    "$env:APPDATA\Ctyun*\*.sqlite"
-)
+# 2. 搜索本地数据库函数
+function Get-CtyunDbPath {
+    $PossibleDbPaths = @(
+        "$env:LOCALAPPDATA\CtyunClouddeskPublic\QML\OfflineStorage\Databases\*.sqlite",
+        "$env:APPDATA\CtyunClouddeskPublic\QML\OfflineStorage\Databases\*.sqlite",
+        "$env:USERPROFILE\.local\share\CtyunClouddeskPublic\QML\OfflineStorage\Databases\*.sqlite",
+        "$env:LOCALAPPDATA\Ctyun*\*.sqlite",
+        "$env:APPDATA\Ctyun*\*.sqlite"
+    )
 
-foreach ($pattern in $PossibleDbPaths) {
-    $found = Get-ChildItem -Path $pattern -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 10000 } | Select-Object -First 1
-    if ($found) {
-        $DbPath = $found.FullName
-        break
+    foreach ($pattern in $PossibleDbPaths) {
+        $found = Get-ChildItem -Path $pattern -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 10000 } | Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+
+    $found = Get-ChildItem -Path "$env:LOCALAPPDATA", "$env:APPDATA" -Filter "*.sqlite" -Recurse -Depth 4 -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like "*Ctyun*" -or $_.FullName -like "*clink*" } | Select-Object -First 1
+    if ($found) { return $found.FullName }
+
+    return ""
+}
+
+$DbPath = Get-CtyunDbPath
+
+# 3. 如果未检测到数据库，自动拉起官方客户端供用户直接扫码，并倒计时等待
+if (-not $DbPath) {
+    Write-Host "`n[!] 检测到客户端尚未登录，正在为你自动打开官方登录窗口..." -ForegroundColor Yellow
+    
+    # 启动官方客户端主程序供用户扫码
+    $running = Get-Process -Name "clouddesktop-qml" -ErrorAction SilentlyContinue
+    if (-not $running) {
+        Start-Process -FilePath $ClientExe
+    }
+
+    Write-Host "📱 请在弹出的天翼云电脑客户端窗口中使用微信或App扫码登录！" -ForegroundColor Cyan
+    Write-Host "⏳ 脚本正在自动监听登录状态 (扫码成功后将自动开始保活)..." -ForegroundColor Gray
+
+    # 循环监听直到用户扫码登录完成
+    $MaxWait = 180
+    $Elapsed = 0
+    while ($Elapsed -lt $MaxWait) {
+        Start-Sleep -Seconds 2
+        $Elapsed += 2
+        $DbPath = Get-CtyunDbPath
+        if ($DbPath) {
+            # 进一步检测是否写入了账号数据
+            try {
+                $content = [System.IO.File]::ReadAllText($DbPath)
+                if ($content -like "*crashAccountData*" -or $content -like "*userAccount*") {
+                    Write-Host "`n✅ 扫码登录成功！已捕获登录凭据与账号信息！" -ForegroundColor Green
+                    break
+                }
+            } catch {}
+        }
+        Write-Host -NoNewline "."
+    }
+
+    if (-not $DbPath) {
+        Write-Host "`n[X] 等待扫码超时，请重新运行脚本完成授权。" -ForegroundColor Red
+        return
     }
 }
 
-# 深度搜索兜底 (若上述固定目录未找到)
-if (-not $DbPath) {
-    Write-Host "[*] 正在扫描本地客户端用户数据，请稍候..." -ForegroundColor Gray
-    $found = Get-ChildItem -Path "$env:LOCALAPPDATA", "$env:APPDATA" -Filter "*.sqlite" -Recurse -Depth 4 -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like "*Ctyun*" -or $_.FullName -like "*clink*" } | Select-Object -First 1
-    if ($found) { $DbPath = $found.FullName }
-}
+Write-Host "`n[+] 本地配置数据库: $DbPath" -ForegroundColor Green
 
-if (-not $DbPath) {
-    Write-Host "`n[!] 提示: 未检测到已登录的本地离线数据库缓存。" -ForegroundColor Yellow
-    Write-Host "    请先在桌面手动双击打开天翼云电脑客户端，使用微信/手机号登录一次账号。" -ForegroundColor White
-    Write-Host "    登录成功后，重新执行本命令即可！" -ForegroundColor Cyan
-    return
-}
-
-Write-Host "[+] 本地配置数据库: $DbPath" -ForegroundColor Green
-
-# 3. 停止当前运行的客户端进程
+# 4. 停止当前运行的客户端进程
 function Stop-CtyunProcesses {
     Stop-Process -Name "clouddesktop-qml" -Force -ErrorAction SilentlyContinue
     Stop-Process -Name "clouddesktop-daemon" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 }
 
-# 4. 原生修改本地目标设备 ID
+# 5. 原生修改本地目标设备 ID
 function Set-CurrentDesktopId([string]$TargetId, [string]$TargetCode) {
     $hasPy = Get-Command "python" -ErrorAction SilentlyContinue
     if ($hasPy) {
@@ -137,7 +167,7 @@ function Set-CurrentDesktopId([string]$TargetId, [string]$TargetCode) {
     } catch {}
 }
 
-# 5. 主轮询守护
+# 6. 主轮询守护
 $Round = 1
 while ($true) {
     Write-Host "`n🔄 === 开始第 $Round 轮多设备保活巡检 ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) ===" -ForegroundColor Yellow
