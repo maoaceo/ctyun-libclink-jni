@@ -26,17 +26,23 @@ chmod +x setup.sh ctyun.sh CtyunStart clouddesktop-qml
 ```
 > 输出官方直链二维码地址，手机直接打开或扫码即可完成授权。
 
-### 3. 查看连接状态
+### 3. 自动扫描名下所有云电脑
+```bash
+./ctyun.sh scan
+```
+> 直接从官方接口解析返回当前账号下所有设备列表、8位纯数字 ID、设备编码（`D00...`）以及当前的开关机状态（`已关机` / `运行中`）。
+
+### 4. 查看连接状态
 ```bash
 ./ctyun.sh status
 ```
 
-### 4. 实时查看串流日志
+### 5. 实时查看串流日志
 ```bash
 ./ctyun.sh log
 ```
 
-### 5. 停止运行
+### 6. 停止运行
 ```bash
 ./ctyun.sh stop
 ```

@@ -50,6 +50,42 @@ case "$1" in
             echo "[STOPPED] 客户端未运行。"
         fi
         ;;
+    scan)
+        TODAY_LOG="$LOG_DIR/$(date +%Y-%m-%d).log"
+        if [ ! -f "$TODAY_LOG" ]; then
+            echo "[!] 暂无今日日志，请先 ./ctyun.sh start 启动一次"
+            exit 1
+        fi
+        python3 - << 'PY'
+import json, re, os, glob
+
+today = os.path.expanduser("~/.local/share/CtyunClouddeskPublic/Log/" + os.popen("date +%Y-%m-%d").read().strip() + ".log")
+found = False
+if os.path.exists(today):
+    with open(today, "r", encoding="utf-8", errors="ignore") as f:
+        lines = f.readlines()
+    for line in reversed(lines):
+        if "pageDesktop" in line and "desktopList" in line:
+            m = re.search(r'\"desktopList\":(\[.*?\]),\"preemptionDesktopList\"', line)
+            if m:
+                try:
+                    dlist = json.loads(m.group(1))
+                    print("=" * 70)
+                    print(f"{'序号':<6} {'云电脑ID':<12} {'机器编码':<22} {'状态':<10} {'名称'}")
+                    print("-" * 70)
+                    for idx, d in enumerate(dlist, 1):
+                        status = d.get('useStatusText', '未知')
+                        print(f"{idx:<6} {d.get('objId'):<12} {d.get('desktopCode'):<22} {status:<10} {d.get('objName')}")
+                    print("=" * 70)
+                    print(f"[OK] 成功从官方接口解析到 {len(dlist)} 台设备！")
+                    found = True
+                    break
+                except Exception:
+                    pass
+if not found:
+    print("[!] 尚未获取到设备列表，请确保已通过 ./ctyun.sh qr 扫码登录！")
+PY
+        ;;
     qr)
         TODAY_LOG="$LOG_DIR/$(date +%Y-%m-%d).log"
         if [ ! -f "$TODAY_LOG" ]; then
@@ -81,7 +117,7 @@ case "$1" in
         $0 start
         ;;
     *)
-        echo "用法: $0 {start|stop|restart|status|qr|log}"
+        echo "用法: $0 {start|stop|restart|status|scan|qr|log}"
         exit 1
         ;;
 esac

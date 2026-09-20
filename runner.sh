@@ -7,6 +7,9 @@ PYTHON_BIN="/usr/bin/python3"
 MGR_SCRIPT="/root/ctyun-headless/instance_manager.py"
 
 case "$1" in
+    scan)
+        ./ctyun.sh scan
+        ;;
     list)
         $PYTHON_BIN $MGR_SCRIPT list
         ;;
@@ -30,6 +33,7 @@ case "$1" in
         echo "天翼云电脑 多实例与设备隔离防冲突管理器"
         echo "=========================================================="
         echo "常用命令:"
+        echo "  $0 scan                                          # 自动从官方接口扫描当前账号名下所有机器及开关机状态"
         echo "  $0 list                                          # 列出所有实例及当前连接锁定的机器"
         echo "  $0 start <实例名> [机器备注/设备编码] [云电脑ID]   # 启动新实例 (自带防重复锁定)"
         echo "  $0 qr <实例名>                                   # 获取该实例的专属登录二维码"
