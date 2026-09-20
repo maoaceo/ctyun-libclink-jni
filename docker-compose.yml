@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  # 账号 1 (默认实例，端口 8572)
+  ctyun-acc1:
+    image: lusean23/ctyun-libclink-jni:latest
+    container_name: ctyun-acc1
+    restart: always
+    ports:
+      - "8572:8572"
+    volumes:
+      - ./data/acc1/config.json:/app/config.json
+      - ./data/acc1/home:/root
+    environment:
+      - TZ=Asia/Shanghai
+
+  # 账号 2 (多开实例，端口 8573 - 按需开启)
+  # ctyun-acc2:
+  #   image: lusean23/ctyun-libclink-jni:latest
+  #   container_name: ctyun-acc2
+  #   restart: always
+  #   ports:
+  #     - "8573:8572"
+  #   volumes:
+  #     - ./data/acc2/config.json:/app/config.json
+  #     - ./data/acc2/home:/root
+  #   environment:
+  #     - TZ=Asia/Shanghai

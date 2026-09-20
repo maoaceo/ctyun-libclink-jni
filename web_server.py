@@ -23,7 +23,16 @@ IS_WINDOWS = sys.platform.startswith("win")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-LOG_FILE = os.path.join(BASE_DIR, "robin.log")
+
+# 检查命令行是否指定独立配置文件 (多开实例支持)
+INSTANCE_NAME = "default"
+if len(sys.argv) > 1 and sys.argv[1].endswith(".json"):
+    CONFIG_FILE = os.path.abspath(sys.argv[1])
+    inst_dir = os.path.dirname(CONFIG_FILE)
+    INSTANCE_NAME = os.path.basename(inst_dir)
+    LOG_FILE = os.path.join(inst_dir, "robin.log")
+else:
+    LOG_FILE = os.path.join(BASE_DIR, "robin.log")
 
 if IS_WINDOWS:
     LOG_DIR = os.path.expandvars(r"%LOCALAPPDATA%\CtyunClouddeskPublic\Log")
