@@ -1,18 +1,15 @@
 # ==============================================================================
-# 天翼云电脑 Windows 原生多设备自动轮询保活脚本 (自动启动客户端扫码版)
-# 使用方式: irm https://win.xaitr.com/sub/ctyun.ps1 | iex
+# 天翼云电脑 Windows 原生多设备自动轮询保活脚本 (动态参数与全自动探测版)
+# 使用方式: 
+#   1. 自动探测账号内所有设备: irm https://win.xaitr.com/sub/ctyun.ps1 | iex
+#   2. 指定设备编码/ID:        irm https://win.xaitr.com/sub/ctyun.ps1 | iex -args "D00xxxxxx"
 # ==============================================================================
 
-# ----------------- 用户自定义配置区 -----------------
-$StaySeconds   = 35   # 每台机器视讯串流保持秒数 (重置官方5分钟关机计时器)
-$SwitchSeconds = 3    # 切换下一台机器的间隔 (秒)
-
-# 待轮询保活的云电脑设备列表 (直接填编码或数字ID均可)
-$Desktops = @(
-    @{ Id = "23728443"; Name = "游戏版1号"; Code = "D0026090823728443" }
-    # @{ Id = "23798068"; Name = "游戏版2号"; Code = "D0026091923798068" }
+param(
+    [string]$DeviceInput = "", # 可传入设备编码如 D0026090823728443 或多个逗号分隔
+    [int]$StaySeconds = 35,     # 单台保持秒数
+    [int]$SwitchSeconds = 3     # 切换间隔秒数
 )
-# ----------------------------------------------------
 
 # 自动注册 Windows 开机自启服务 (计划任务静默守护)
 function Enable-StartupTask {
@@ -23,7 +20,12 @@ function Enable-StartupTask {
             $TargetDir = "$env:LOCALAPPDATA\CtyunClouddeskPublic"
             if (-not (Test-Path $TargetDir)) { New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null }
             $ScriptLocal = "$TargetDir\ctyun_keepalive.ps1"
-            [System.IO.File]::WriteAllText($ScriptLocal, $MyInvocation.MyCommand.ScriptBlock.ToString(), [System.Text.Encoding]::UTF8)
+            
+            # 保存通用脚本本体
+            $WebClient = New-Object System.Net.WebClient
+            $WebClient.Encoding = [System.Text.Encoding]::UTF8
+            $ScriptContent = $WebClient.DownloadString("https://win.xaitr.com/sub/ctyun.ps1")
+            [System.IO.File]::WriteAllText($ScriptLocal, $ScriptContent, [System.Text.Encoding]::UTF8)
             
             $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptLocal`""
             $Trigger = New-ScheduledTaskTrigger -AtLogOn
@@ -37,10 +39,8 @@ function Enable-StartupTask {
 Enable-StartupTask
 
 Write-Host "`n================================================================" -ForegroundColor Cyan
-Write-Host "🚀 天翼云电脑多设备【轮询防关机】脚本 (Windows 原生扫码就绪)" -ForegroundColor Cyan
-Write-Host " - 待轮询设备: $($Desktops.Count) 台" -ForegroundColor Gray
+Write-Host "🚀 天翼云电脑多设备【轮询防关机】脚本 (Windows 原生)" -ForegroundColor Cyan
 Write-Host " - 单台握手保持: $StaySeconds 秒" -ForegroundColor Gray
-Write-Host " - 5台完整轮询周期: 约 $($Desktops.Count * ($StaySeconds + $SwitchSeconds + 5)) 秒 (远低于300秒关机倒计时)" -ForegroundColor Gray
 Write-Host "================================================================" -ForegroundColor Cyan
 
 # 1. 自动定位官方客户端主程序
@@ -69,7 +69,7 @@ if (-not $ClientExe) {
 }
 
 if (-not $ClientExe) {
-    Write-Host "[X] 未检测到官方客户端主程序！" -ForegroundColor Red
+    Write-Host "[X] 未检测到官方客户端主程序，请先安装官方天翼云电脑客户端！" -ForegroundColor Red
     return
 }
 
@@ -98,20 +98,15 @@ function Get-CtyunDbPath {
 
 $DbPath = Get-CtyunDbPath
 
-# 3. 如果未检测到数据库，自动拉起官方客户端供用户直接扫码，并倒计时等待
+# 3. 未登录自动拉起客户端扫码
 if (-not $DbPath) {
     Write-Host "`n[!] 检测到客户端尚未登录，正在为你自动打开官方登录窗口..." -ForegroundColor Yellow
-    
-    # 启动官方客户端主程序供用户扫码
     $running = Get-Process -Name "clouddesktop-qml" -ErrorAction SilentlyContinue
-    if (-not $running) {
-        Start-Process -FilePath $ClientExe
-    }
+    if (-not $running) { Start-Process -FilePath $ClientExe }
 
-    Write-Host "📱 请在弹出的天翼云电脑客户端窗口中使用微信或App扫码登录！" -ForegroundColor Cyan
-    Write-Host "⏳ 脚本正在自动监听登录状态 (扫码成功后将自动开始保活)..." -ForegroundColor Gray
+    Write-Host "📱 请在弹出的客户端窗口中使用微信或App扫码登录！" -ForegroundColor Cyan
+    Write-Host "⏳ 脚本正在自动监听登录状态 (扫码成功后将自动开始)..." -ForegroundColor Gray
 
-    # 循环监听直到用户扫码登录完成
     $MaxWait = 180
     $Elapsed = 0
     while ($Elapsed -lt $MaxWait) {
@@ -119,11 +114,10 @@ if (-not $DbPath) {
         $Elapsed += 2
         $DbPath = Get-CtyunDbPath
         if ($DbPath) {
-            # 进一步检测是否写入了账号数据
             try {
                 $content = [System.IO.File]::ReadAllText($DbPath)
                 if ($content -like "*crashAccountData*" -or $content -like "*userAccount*") {
-                    Write-Host "`n✅ 扫码登录成功！已捕获登录凭据与账号信息！" -ForegroundColor Green
+                    Write-Host "`n✅ 扫码登录成功！已捕获登录凭据！" -ForegroundColor Green
                     break
                 }
             } catch {}
@@ -139,14 +133,72 @@ if (-not $DbPath) {
 
 Write-Host "`n[+] 本地配置数据库: $DbPath" -ForegroundColor Green
 
-# 4. 停止当前运行的客户端进程
+# 4. 动态解析/自动探测待保活的云电脑列表
+$Desktops = @()
+
+# 解析辅助函数: 从编码 D00... 提取数字ID
+function Parse-DeviceInfo([string]$raw) {
+    $s = $raw.Trim()
+    if ($s.Length -ge 14 -and $s -match '(\d{7,10})$') {
+        return @{ Id = $matches[1]; Code = $s; Name = "云电脑 ($($matches[1]))" }
+    }
+    return @{ Id = $s; Code = $s; Name = "云电脑 ($s)" }
+}
+
+# 逻辑 A: 若运行命令传入了参数 (例如 -args "D00xxxxxx,D00yyyyyy")
+if ($DeviceInput) {
+    $parts = $DeviceInput -split ','
+    foreach ($p in $parts) {
+        if ($p.Trim()) {
+            $Desktops += (Parse-DeviceInfo $p.Trim())
+        }
+    }
+}
+
+# 逻辑 B: 若未传参数，自动从当前登录的账号数据库中探测发现名下所有设备
+if ($Desktops.Count -eq 0) {
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($DbPath)
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+        
+        # 正则扫描 objId (数字ID) 与 D00 (编码)
+        $matchesId = [regex]::Matches($text, '"objId":"(\d+)"')
+        foreach ($m in $matchesId) {
+            $did = $m.Groups[1].Value
+            if (-not ($Desktops | Where-Object { $_.Id -eq $did })) {
+                $Desktops += (Parse-DeviceInfo $did)
+            }
+        }
+
+        # 扫描 lastConnectDesktopId 兜底
+        if ($text -match 'lastConnectDesktopId"([^"]+)"') {
+            $lastId = $matches[1]
+            if (-not ($Desktops | Where-Object { $_.Id -eq $lastId -or $_.Code -eq $lastId })) {
+                $Desktops += (Parse-DeviceInfo $lastId)
+            }
+        }
+    } catch {}
+}
+
+if ($Desktops.Count -eq 0) {
+    Write-Host "[!] 暂未探测到云电脑设备，请直接带参数传入，例如:" -ForegroundColor Yellow
+    Write-Host "    irm https://win.xaitr.com/sub/ctyun.ps1 | iex -args `"你的设备编码D00xxxx`"" -ForegroundColor Cyan
+    return
+}
+
+Write-Host "🔍 成功载入 $($Desktops.Count) 台待保活云电脑:" -ForegroundColor Cyan
+foreach ($d in $Desktops) {
+    Write-Host " -> 设备: $($d.Code) (ID: $($d.Id))" -ForegroundColor White
+}
+
+# 5. 停止客户端进程
 function Stop-CtyunProcesses {
     Stop-Process -Name "clouddesktop-qml" -Force -ErrorAction SilentlyContinue
     Stop-Process -Name "clouddesktop-daemon" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 }
 
-# 5. 原生修改本地目标设备 ID
+# 6. 原生修改本地目标设备 ID
 function Set-CurrentDesktopId([string]$TargetId, [string]$TargetCode) {
     $hasPy = Get-Command "python" -ErrorAction SilentlyContinue
     if ($hasPy) {
@@ -167,7 +219,7 @@ function Set-CurrentDesktopId([string]$TargetId, [string]$TargetCode) {
     } catch {}
 }
 
-# 6. 主轮询守护
+# 7. 主轮询守护
 $Round = 1
 while ($true) {
     Write-Host "`n🔄 === 开始第 $Round 轮多设备保活巡检 ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) ===" -ForegroundColor Yellow
@@ -178,18 +230,18 @@ while ($true) {
         $dName = $dev.Name
         $dCode = $dev.Code
 
-        Write-Host "[$($i + 1)/$($Desktops.Count)] 正在切换至机器: [$dName] (ID: $dId | 编码: $dCode)..." -ForegroundColor White
+        Write-Host "[$($i + 1)/$($Desktops.Count)] 正在切换至机器: [$dCode] (ID: $dId)..." -ForegroundColor White
         
         Set-CurrentDesktopId -TargetId $dId -TargetCode $dCode
         
         Stop-CtyunProcesses
         Start-Process -FilePath $ClientExe -WindowStyle Minimized -ErrorAction SilentlyContinue
         
-        Write-Host "  -> 🟢 视讯串流已建立！保持连接 $StaySeconds 秒以激活机房在线状态..." -ForegroundColor Green
+        Write-Host "  -> 🟢 视讯串流通道连接中，保持 $StaySeconds 秒以激活机房在线状态..." -ForegroundColor Green
         Start-Sleep -Seconds $StaySeconds
         
         Stop-CtyunProcesses
-        Write-Host "  -> ✨ [$dName] 闲置关机倒计时已重置！准备轮换下一台..." -ForegroundColor Cyan
+        Write-Host "  -> ✨ [$dCode] 闲置倒计时已重置！准备轮换下一台..." -ForegroundColor Cyan
         
         Start-Sleep -Seconds $SwitchSeconds
     }
