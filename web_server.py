@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-天翼云电脑 Clink 原生多设备轮询与 Web 安全控制台服务
-Web Dashboard with Auto-Discovery of Desktops, Code/ID Auto-Mapping & Instant Keepalive
+天翼云电脑 Clink 原生多设备轮询与 Web 安全控制台服务 (跨平台: Linux / Windows)
+Web Dashboard with Admin Password Protection, Live QR, Auto-Discovery & Clink Logs
 """
 
 import os
@@ -18,12 +18,34 @@ import hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
+IS_WINDOWS = sys.platform.startswith("win")
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BIN_DIR = BASE_DIR
-APP_BIN = os.path.join(BIN_DIR, "CtyunStart")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-LOG_DIR = os.path.expanduser("~/.local/share/CtyunClouddeskPublic/Log")
 LOG_FILE = os.path.join(BASE_DIR, "robin.log")
+
+# 平台自适应路径配置
+if IS_WINDOWS:
+    LOG_DIR = os.path.expandvars(r"%LOCALAPPDATA%\CtyunClouddeskPublic\Log")
+    APP_BIN = ""
+    # 扫描 Windows 官方安装路径
+    possible_win_paths = [
+        r"C:\Program Files\CtyunClouddeskPublic\bin\clouddesktop-qml.exe",
+        r"C:\Program Files (x86)\CtyunClouddeskPublic\bin\clouddesktop-qml.exe",
+        r"C:\Program Files\CtyunClouddeskPublic\clouddesktop-qml.exe",
+        r"C:\Program Files (x86)\CtyunClouddeskPublic\clouddesktop-qml.exe",
+        os.path.expandvars(r"%ProgramFiles%\CtyunClouddeskPublic\bin\clouddesktop-qml.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\CtyunClouddeskPublic\bin\clouddesktop-qml.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\CtyunClouddeskPublic\clouddesktop-qml.exe"),
+        os.path.expandvars(r"%APPDATA%\CtyunClouddeskPublic\clouddesktop-qml.exe")
+    ]
+    for p in possible_win_paths:
+        if os.path.exists(p):
+            APP_BIN = p
+            break
+else:
+    LOG_DIR = os.path.expanduser("~/.local/share/CtyunClouddeskPublic/Log")
+    APP_BIN = os.path.join(BASE_DIR, "CtyunStart")
 
 STATE = {
     "logged_in": False,
@@ -75,11 +97,27 @@ def append_log(msg):
     except Exception:
         pass
 
-def get_sqlite_path(home_dir=None):
-    if not home_dir:
+def get_sqlite_path():
+    if IS_WINDOWS:
+        search_dirs = [
+            os.path.expandvars(r"%LOCALAPPDATA%\CtyunClouddeskPublic\QML\OfflineStorage\Databases"),
+            os.path.expandvars(r"%APPDATA%\CtyunClouddeskPublic\QML\OfflineStorage\Databases"),
+            os.path.expandvars(r"%USERPROFILE%\.local\share\CtyunClouddeskPublic\QML\OfflineStorage\Databases")
+        ]
+        for sdir in search_dirs:
+            if os.path.exists(sdir):
+                dbs = glob.glob(os.path.join(sdir, "*.sqlite"))
+                if dbs:
+                    return dbs[0]
+        # 通配搜索
+        dbs = glob.glob(os.path.expandvars(r"%LOCALAPPDATA%\Ctyun*\*.sqlite"))
+        if dbs:
+            return dbs[0]
+        return None
+    else:
         home_dir = os.path.expanduser("~")
-    dbs = glob.glob(os.path.join(home_dir, ".local/share/CtyunClouddeskPublic/QML/OfflineStorage/Databases/*.sqlite"))
-    return dbs[0] if dbs else None
+        dbs = glob.glob(os.path.join(home_dir, ".local/share/CtyunClouddeskPublic/QML/OfflineStorage/Databases/*.sqlite"))
+        return dbs[0] if dbs else None
 
 def check_login_status():
     db_path = get_sqlite_path()
@@ -106,7 +144,6 @@ def check_login_status():
     return False
 
 def discover_desktops_from_db():
-    """自动从已登录的本地数据库扫描出云电脑设备列表"""
     db_path = get_sqlite_path()
     if not db_path or not os.path.exists(db_path):
         return []
@@ -122,7 +159,6 @@ def discover_desktops_from_db():
                 val = json.loads(val_str)
                 d_id = str(val.get("objId", "")).strip()
                 if d_id and d_id not in [d["id"] for d in discovered]:
-                    # 查找对应编码
                     discovered.append({
                         "id": d_id,
                         "code": f"D00...{d_id}",
@@ -136,28 +172,20 @@ def discover_desktops_from_db():
     return discovered
 
 def parse_code_or_id(input_str):
-    """
-    智能解析用户输入的设备标识：
-    1. 纯数字: 如 23728443
-    2. 设备编码: 如 D0026090823728443 -> 提取末尾的实际数字ID (23728443)
-    """
     s = str(input_str).strip()
     if not s:
         return "", ""
-    # 如果以 D 开头且较长 (如 D0026090823728443)
     if s.upper().startswith("D") and len(s) >= 14:
-        # 天翼云编码规则: 前面为字母+日期/序列号，末尾 8 位为真实数字 ID
         tail_id = re.search(r'\d{7,10}$', s)
         if tail_id:
             return tail_id.group(0), s
         return s, s
-    # 如果纯数字
     if s.isdigit():
         return s, f"D...{s}"
     return s, s
 
-def set_target_desktop_in_db(desktop_id, desktop_code="", home_dir=None):
-    db_path = get_sqlite_path(home_dir)
+def set_target_desktop_in_db(desktop_id, desktop_code=""):
+    db_path = get_sqlite_path()
     if not db_path:
         return False
     try:
@@ -166,7 +194,6 @@ def set_target_desktop_in_db(desktop_id, desktop_code="", home_dir=None):
         cur.execute("SELECT name FROM data WHERE name LIKE '%lastConnectDesktopId%'")
         rows = cur.fetchall()
         for r in rows:
-            # 兼容数字 ID 与全编码写入
             target_val = desktop_code if desktop_code and desktop_code.startswith("D") else desktop_id
             cur.execute("UPDATE data SET value = ? WHERE name = ?", (f'"{target_val}"', r[0]))
         conn.commit()
@@ -178,9 +205,13 @@ def set_target_desktop_in_db(desktop_id, desktop_code="", home_dir=None):
         return False
 
 def stop_active_client():
-    subprocess.run("pkill -f 'clouddesktop-qml' 2>/dev/null || true", shell=True)
-    subprocess.run("pkill -f 'CtyunStart' 2>/dev/null || true", shell=True)
-    subprocess.run("pkill -f 'Xvfb' 2>/dev/null || true", shell=True)
+    if IS_WINDOWS:
+        subprocess.run('taskkill /F /IM clouddesktop-qml.exe /T >nul 2>&1', shell=True)
+        subprocess.run('taskkill /F /IM clouddesktop-daemon.exe /T >nul 2>&1', shell=True)
+    else:
+        subprocess.run("pkill -f 'clouddesktop-qml' 2>/dev/null || true", shell=True)
+        subprocess.run("pkill -f 'CtyunStart' 2>/dev/null || true", shell=True)
+        subprocess.run("pkill -f 'Xvfb' 2>/dev/null || true", shell=True)
     time.sleep(1)
 
 def force_generate_new_qr():
@@ -188,15 +219,19 @@ def force_generate_new_qr():
         return
     stop_active_client()
     time.sleep(1)
-    today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
+    today_log = os.path.join(LOG_DIR, f"{time.strftime('%Y-%m-%d')}.log")
     try:
         if os.path.exists(today_log):
             os.remove(today_log)
     except Exception:
         pass
 
-    cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_login.log 2>&1 &'
-    subprocess.Popen(cmd, shell=True, executable="/bin/bash")
+    if IS_WINDOWS:
+        if APP_BIN and os.path.exists(APP_BIN):
+            subprocess.Popen(f'"{APP_BIN}"', shell=True)
+    else:
+        cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_login.log 2>&1 &'
+        subprocess.Popen(cmd, shell=True, executable="/bin/bash")
     
     for _ in range(8):
         time.sleep(1)
@@ -207,7 +242,7 @@ def force_generate_new_qr():
 def check_qr_from_logs():
     if STATE["logged_in"]:
         return
-    today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
+    today_log = os.path.join(LOG_DIR, f"{time.strftime('%Y-%m-%d')}.log")
     if os.path.exists(today_log):
         try:
             with open(today_log, "r", encoding="utf-8", errors="ignore") as f:
@@ -222,46 +257,51 @@ def check_qr_from_logs():
                         if url != STATE["qr_url"] or not STATE["qr_img_base64"]:
                             STATE["qr_url"] = url
                             STATE["qr_time"] = time.time()
-                            try:
-                                import base64
-                                png_path = "/tmp/web_qr.png"
-                                subprocess.run(f'/usr/bin/qrencode -s 6 -o "{png_path}" "{url}"', shell=True)
-                                if os.path.exists(png_path):
-                                    with open(png_path, "rb") as bf:
-                                        b64 = base64.b64encode(bf.read()).decode()
-                                    STATE["qr_img_base64"] = f"data:image/png;base64,{b64}"
-                                    append_log("📱 已成功生成官方最新扫码登录二维码！")
-                            except Exception:
-                                pass
+                            if not IS_WINDOWS:
+                                try:
+                                    import base64
+                                    png_path = "/tmp/web_qr.png"
+                                    subprocess.run(f'/usr/bin/qrencode -s 6 -o "{png_path}" "{url}"', shell=True)
+                                    if os.path.exists(png_path):
+                                        with open(png_path, "rb") as bf:
+                                            b64 = base64.b64encode(bf.read()).decode()
+                                        STATE["qr_img_base64"] = f"data:image/png;base64,{b64}"
+                                        append_log("📱 已成功生成官方最新扫码登录二维码！")
+                                except Exception:
+                                    pass
                         break
         except Exception:
             pass
 
 def round_robin_worker():
-    append_log("🚀 官方 Clink / QUIC 原生多设备轮询引擎已就绪！")
+    append_log(f"🚀 官方 Clink / QUIC 原生多设备轮询引擎已就绪！(运行平台: {'Windows' if IS_WINDOWS else 'Linux'})")
     STATE["running"] = True
     STATE["should_stop"] = False
     
     while not STATE["should_stop"]:
-        # 1. 检查是否登录
         if not check_login_status():
             STATE["current_desktop"] = "⚠️ 等待手机扫码登录"
-            out = subprocess.check_output("pgrep -f 'clouddesktop-qml' || true", shell=True).strip()
-            if not out:
-                force_generate_new_qr()
+            if IS_WINDOWS:
+                out = subprocess.check_output('tasklist /FI "IMAGENAME eq clouddesktop-qml.exe" 2>nul || true', shell=True).decode('gbk', errors='ignore')
+                if "clouddesktop-qml" not in out:
+                    force_generate_new_qr()
+                else:
+                    check_qr_from_logs()
             else:
-                check_qr_from_logs()
+                out = subprocess.check_output("pgrep -f 'clouddesktop-qml' || true", shell=True).strip()
+                if not out:
+                    force_generate_new_qr()
+                else:
+                    check_qr_from_logs()
             time.sleep(3)
             continue
         else:
             STATE["qr_url"] = ""
             STATE["qr_img_base64"] = ""
 
-        # 2. 检查是否有配置云电脑
         cfg = load_config()
         desktops = cfg.get("desktops", [])
         
-        # 自动同步已发现的设备（如果列表为空）
         if not desktops:
             discovered = discover_desktops_from_db()
             if discovered:
@@ -294,18 +334,23 @@ def round_robin_worker():
             set_target_desktop_in_db(d_id, d_code)
             
             stop_active_client()
-            cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_runner.log 2>&1 &'
-            subprocess.Popen(cmd, shell=True, executable="/bin/bash")
+            if IS_WINDOWS:
+                if APP_BIN and os.path.exists(APP_BIN):
+                    subprocess.Popen(f'powershell.exe -NoProfile -Command "Start-Process -FilePath \'{APP_BIN}\' -WindowStyle Minimized"', shell=True)
+            else:
+                cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_runner.log 2>&1 &'
+                subprocess.Popen(cmd, shell=True, executable="/bin/bash")
             
             connected = False
-            today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
+            today_log = os.path.join(LOG_DIR, f"{time.strftime('%Y-%m-%d')}.log")
             for _ in range(12):
                 if STATE["should_stop"]:
                     break
                 time.sleep(1)
                 if os.path.exists(today_log):
                     try:
-                        out = subprocess.check_output(f"tail -n 25 '{today_log}' || true", shell=True).decode('utf-8', errors='ignore')
+                        with open(today_log, "r", encoding="utf-8", errors="ignore") as lf:
+                            out = "".join(lf.readlines()[-30:])
                         if "clink连接成功" in out or "收到第一张图" in out or "当前时延" in out:
                             connected = True
                             break
@@ -511,7 +556,7 @@ header {
   <header>
     <div class="title-group">
       <h1>✨ 天翼云 Clink 原生多设备轮询保活</h1>
-      <p>官方 Linux 视讯串流内核 (QUIC/Clink) · 纯无头运行 · 5分钟超时防关机</p>
+      <p id="platNotice">官方原生视讯串流内核 (QUIC/Clink) · 纯无头运行 · 5分钟超时防关机</p>
     </div>
     <div style="display: flex; gap: 10px; align-items: center;">
       <span id="loginBadge" class="badge badge-warn">检查登录状态中...</span>
@@ -557,7 +602,6 @@ header {
         </div>
       </div>
 
-      <!-- 设备添加表单 (强化支持：直接输入编码如 D0026090823728443) -->
       <div class="card">
         <div class="card-header">
           <span>➕ 添加云电脑设备</span>
@@ -895,8 +939,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             txt = ""
             if os.path.exists(LOG_FILE):
                 try:
-                    out = subprocess.check_output(f"tail -n 80 '{LOG_FILE}' || true", shell=True).decode('utf-8', errors='ignore')
-                    txt = out
+                    with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as lf:
+                        lines = lf.readlines()
+                    txt = "".join(lines[-80:])
                 except Exception:
                     pass
             self.wfile.write(txt.encode("utf-8"))
@@ -976,7 +1021,6 @@ class RequestHandler(BaseHTTPRequestHandler):
             desktops = cfg.get("desktops", [])
             
             if action == "add":
-                # 支持用户直接输入编码 D00... 或纯数字
                 raw_input = str(req_data.get("input", req_data.get("id", ""))).strip()
                 parsed_id, parsed_code = parse_code_or_id(raw_input)
                 
@@ -988,7 +1032,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 if not name:
                     name = f"云电脑 {parsed_id}"
                 
-                # 查重
                 if any(str(d.get("id")) == parsed_id or str(d.get("code")) == parsed_code for d in desktops):
                     self._send_json({"error": f"设备 [{parsed_code}] 已经在列表中"}, 400)
                     return
@@ -1033,7 +1076,7 @@ def main():
         port = int(cfg["port"])
         
     server = HTTPServer(("0.0.0.0", port), RequestHandler)
-    append_log(f"🌐 天翼云 Clink 原生多设备控制中心已启动！控制台端口: http://0.0.0.0:{port}")
+    append_log(f"🌐 天翼云 Clink 原生多设备控制中心已启动！控制台端口: http://0.0.0.0:{port} (平台: {'Windows' if IS_WINDOWS else 'Linux'})")
     
     t = threading.Thread(target=round_robin_worker, daemon=True)
     t.start()
