@@ -27,6 +27,16 @@ case "$1" in
             echo "[!] 启动失败，请检查依赖或查看 /tmp/ctyun_app.log"
         fi
         ;;
+    rotate)
+        # 后台启动两台设备的自动开机与 20 秒真实视讯串流保活
+        pkill -9 -f "boot_and_rotate.py" 2>/dev/null || true
+        nohup python3 -u "$BASE_DIR/robin.py" > "$LOG_DIR/../robin.log" 2>&1 &
+        echo "[OK] 自动唤醒与 20 秒真视讯轮询保活已在后台启动！"
+        echo " - 查看实时保活动态: $0 log-rotate"
+        ;;
+    log-rotate)
+        tail -f "$LOG_DIR/../robin.log"
+        ;;
     stop)
         echo "[*] 正在停止天翼云官方客户端..."
         pkill -9 -f "clouddesktop-qml" 2>/dev/null || true
@@ -127,7 +137,7 @@ print('提示: 安装 qrencode 可在终端直接显示字符二维码 (apt inst
         $0 start
         ;;
     *)
-        echo "用法: $0 {start|stop|restart|status|scan|qr|log}"
+        echo "用法: $0 {start|stop|restart|status|scan|qr|log|rotate|log-rotate}"
         exit 1
         ;;
 esac
