@@ -46,6 +46,55 @@ nohup python3 web_server.py > web.log 2>&1 &
 
 ---
 
+## 🚀 开机自启服务配置 (systemd)
+
+在服务器上配置开机自启并后台常驻守护，服务器重启后自动恢复保活：
+
+### 1. 注册 systemd 开机自启服务
+```bash
+cat << 'EOF' > /etc/systemd/system/ctyun-keepalive.service
+[Unit]
+Description=Ctyun Clink Native KeepAlive Web Console
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/ctyun-libclink-jni
+ExecStart=/usr/bin/python3 web_server.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/ctyun-libclink-jni/web.log
+StandardError=append:/root/ctyun-libclink-jni/web.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 重载并启用开机自启
+systemctl daemon-reload
+systemctl enable ctyun-keepalive
+systemctl restart ctyun-keepalive
+```
+
+### 2. 常用服务管理命令
+```bash
+# 查看服务运行状态
+systemctl status ctyun-keepalive
+
+# 查看保活运行日志
+tail -f /root/ctyun-libclink-jni/robin.log
+
+# 重启保活服务
+systemctl restart ctyun-keepalive
+
+# 停止并禁用开机自启
+systemctl stop ctyun-keepalive
+systemctl disable ctyun-keepalive
+```
+
+---
+
 ## 📱 使用步骤
 
 1. **扫码登录**：打开控制台，使用天翼云电脑手机 App / 微信扫码，授权成功后界面自动显示绿色已登录。
