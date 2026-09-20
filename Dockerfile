@@ -3,8 +3,10 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV HOME=/root
+ENV CTYUN_DATA_DIR=/data
 
 WORKDIR /app
+RUN mkdir -p /data
 
 # 安装底层轻量虚拟屏幕、XCB 与视讯依赖
 RUN apt-get update -qq && \

@@ -22,17 +22,17 @@ from urllib.parse import parse_qs, urlparse
 IS_WINDOWS = sys.platform.startswith("win")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+DATA_DIR = os.path.abspath(os.environ.get("CTYUN_DATA_DIR", BASE_DIR))
+os.makedirs(DATA_DIR, exist_ok=True)
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 
-# 检查命令行是否指定独立配置文件 (多开实例支持)
+# 检查命令行是否指定独立配置文件 (兼容旧式多开)
 INSTANCE_NAME = "default"
 if len(sys.argv) > 1 and sys.argv[1].endswith(".json"):
     CONFIG_FILE = os.path.abspath(sys.argv[1])
-    inst_dir = os.path.dirname(CONFIG_FILE)
-    INSTANCE_NAME = os.path.basename(inst_dir)
-    LOG_FILE = os.path.join(inst_dir, "robin.log")
-else:
-    LOG_FILE = os.path.join(BASE_DIR, "robin.log")
+    DATA_DIR = os.path.dirname(CONFIG_FILE)
+    INSTANCE_NAME = os.path.basename(DATA_DIR)
+LOG_FILE = os.path.join(DATA_DIR, "robin.log")
 
 if IS_WINDOWS:
     LOG_DIR = os.path.expandvars(r"%LOCALAPPDATA%\CtyunClouddeskPublic\Log")
@@ -73,6 +73,7 @@ STATE = {
 DEFAULT_CONFIG = {
     "port": 8572,
     "admin_password": "admin",
+    "keepalive_mode": "continuous",
     "stay_seconds": 35,
     "switch_gap": 3,
     "desktops": []
@@ -294,6 +295,72 @@ def round_robin_worker():
             time.sleep(3)
             continue
             
+        mode = cfg.get("keepalive_mode", "continuous")
+
+        # 持久在线模式：每个 Docker 容器只绑定一台机器，连接后不再主动断开
+        if mode == "continuous":
+            d = desktops[0]
+            d_id = d.get("id")
+            d_name = d.get("name", "云电脑")
+            d_code = d.get("code", d_id)
+            STATE["current_desktop"] = f"[{d_name}] ({d_code})"
+
+            if len(desktops) > 1:
+                append_log(f"⚠️ 持久在线模式只连接列表第 1 台；其余 {len(desktops)-1} 台请分别放入独立 Docker 容器。")
+
+            append_log(f"🔗 持久在线连接: [{d_name}] (编码: {d_code} / ID: {d_id})")
+            set_target_desktop_in_db(d_id, d_code)
+            stop_active_client()
+
+            if IS_WINDOWS:
+                if APP_BIN and os.path.exists(APP_BIN):
+                    subprocess.Popen(f'powershell.exe -NoProfile -Command "Start-Process -FilePath \'{APP_BIN}\' -WindowStyle Minimized"', shell=True)
+            else:
+                cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_runner.log 2>&1 &'
+                subprocess.Popen(cmd, shell=True, executable="/bin/bash")
+
+            connected = False
+            today_log = os.path.join(LOG_DIR, f"{time.strftime('%Y-%m-%d')}.log")
+            for _ in range(30):
+                if STATE["should_stop"]:
+                    break
+                time.sleep(1)
+                if os.path.exists(today_log):
+                    try:
+                        with open(today_log, "r", encoding="utf-8", errors="ignore") as lf:
+                            out = "".join(lf.readlines()[-80:])
+                        if "clink连接成功" in out or "收到第一张图" in out or "当前时延" in out:
+                            connected = True
+                            break
+                    except Exception:
+                        pass
+
+            if connected:
+                append_log("✅ 真实 Clink 视讯串流已连通，将一直保持连接，不再轮询断开。")
+            else:
+                append_log("⏳ 客户端已启动，持续等待 Clink 视讯握手；不会主动断开。")
+
+            # 持续监控：客户端退出才自动重启；配置目标变化时切换一次
+            while not STATE["should_stop"]:
+                time.sleep(10)
+                latest_cfg = load_config()
+                latest_desktops = latest_cfg.get("desktops", [])
+                if not latest_desktops:
+                    break
+                latest = latest_desktops[0]
+                if str(latest.get("id")) != str(d_id):
+                    append_log("🔄 检测到绑定设备已改变，准备连接新目标。")
+                    break
+                if IS_WINDOWS:
+                    alive = subprocess.run('tasklist /FI "IMAGENAME eq clouddesktop-qml.exe"', shell=True, capture_output=True, text=True).stdout.lower().find("clouddesktop-qml") >= 0
+                else:
+                    alive = subprocess.run("pgrep -f '/clouddesktop-qml'", shell=True, stdout=subprocess.DEVNULL).returncode == 0
+                if not alive:
+                    append_log("⚠️ 客户端进程异常退出，正在自动重连……")
+                    break
+            continue
+
+        # 兼容旧轮询模式（需在 config.json 显式设置 keepalive_mode=round_robin）
         stay_sec = int(cfg.get("stay_seconds", 35))
         switch_gap = int(cfg.get("switch_gap", 3))
         STATE["round"] += 1
