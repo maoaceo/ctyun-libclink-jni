@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 天翼云电脑 Clink 原生多设备轮询与 Web 安全控制台服务
-Web Dashboard with Admin Password Protection, Instant Live QR Refresh & Clink Logs
+Web Dashboard with Admin Password Protection, Smart QR Refresh & Clink Logs
 """
 
 import os
@@ -131,10 +131,11 @@ def stop_active_client():
     time.sleep(1)
 
 def force_generate_new_qr():
-    """重启客户端获取真正崭新的官方二维码"""
+    """仅在未登录且明确需要时才拉起生成二维码"""
+    if check_login_status():
+        return
     stop_active_client()
     time.sleep(1)
-    # 清空旧日志避免误读旧二维码
     today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
     try:
         if os.path.exists(today_log):
@@ -145,7 +146,6 @@ def force_generate_new_qr():
     cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_login.log 2>&1 &'
     subprocess.Popen(cmd, shell=True, executable="/bin/bash")
     
-    # 等待 4 秒拉取全新二维码
     for _ in range(8):
         time.sleep(1)
         check_qr_from_logs()
@@ -153,6 +153,8 @@ def force_generate_new_qr():
             break
 
 def check_qr_from_logs():
+    if STATE["logged_in"]:
+        return
     today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
     if os.path.exists(today_log):
         try:
@@ -189,9 +191,9 @@ def round_robin_worker():
     STATE["should_stop"] = False
     
     while not STATE["should_stop"]:
+        # 1. 检查是否登录
         if not check_login_status():
             STATE["current_desktop"] = "⚠️ 等待手机扫码登录"
-            # 检查客户端是否还在运行，若挂掉则自动重启
             out = subprocess.check_output("pgrep -f 'clouddesktop-qml' || true", shell=True).strip()
             if not out:
                 force_generate_new_qr()
@@ -199,7 +201,12 @@ def round_robin_worker():
                 check_qr_from_logs()
             time.sleep(3)
             continue
+        else:
+            # 已经登录成功：清空二维码状态，彻底停止二维码刷新与生成
+            STATE["qr_url"] = ""
+            STATE["qr_img_base64"] = ""
 
+        # 2. 检查是否有配置云电脑
         cfg = load_config()
         desktops = cfg.get("desktops", [])
         if not desktops:
@@ -263,7 +270,7 @@ def round_robin_worker():
     STATE["current_desktop"] = None
     append_log("⏹️ 轮询引擎已停止。")
 
-# 引入已完善的安全 UI 模版
+# HTML Web UI 模版 (已登录自动隐藏二维码区域并展示绿色的账号授权卡片)
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -361,6 +368,16 @@ header {
 .qr-box img { max-width: 190px; border-radius: 8px; border: 2px solid var(--border); background: #fff; padding: 4px; }
 .qr-box a { color: var(--primary); font-size: 12px; text-decoration: none; word-break: break-all; display: block; margin-top: 8px; }
 
+.account-box {
+  padding: 16px;
+  background: rgba(0, 230, 118, 0.08);
+  border: 1px solid rgba(0, 230, 118, 0.3);
+  border-radius: 12px;
+  text-align: center;
+}
+.account-box h3 { color: var(--success); font-size: 15px; margin-bottom: 6px; }
+.account-box p { font-size: 12px; color: var(--text-muted); font-family: monospace; }
+
 .device-item {
   display: flex;
   justify-content: space-between;
@@ -445,16 +462,29 @@ header {
 
   <div class="grid">
     <div class="sidebar">
-      <div class="card">
+      <!-- 账号登录面板 (未登录时显示二维码，登录后自动显示已就绪) -->
+      <div class="card" id="authSection">
         <div class="card-header">
-          <span>📱 手机扫码授权登录</span>
-          <button class="btn btn-primary" style="padding: 4px 10px; font-size: 12px;" onclick="refreshQR(true)">🔄 强制刷新二维码</button>
+          <span>📱 账号授权状态</span>
+          <button id="btnRefreshQR" class="btn btn-primary" style="padding: 4px 10px; font-size: 12px;" onclick="refreshQR(true)">🔄 刷新二维码</button>
         </div>
-        <p style="font-size: 12px; color: var(--text-muted);">使用天翼云电脑 App 或微信扫码确认登录：</p>
-        <div class="qr-box">
-          <div id="qrPlaceholder" style="padding: 30px; font-size: 12px; color: var(--text-muted);">正在生成最新官方二维码...</div>
-          <img id="qrImg" src="" style="display: none;">
-          <a id="qrLink" href="#" target="_blank" style="display: none;">🔗 手机直接打开网页授权</a>
+        
+        <!-- 未登录展示区 -->
+        <div id="qrContainer">
+          <p style="font-size: 12px; color: var(--text-muted);">使用天翼云电脑 App 或微信扫码确认登录：</p>
+          <div class="qr-box">
+            <div id="qrPlaceholder" style="padding: 30px; font-size: 12px; color: var(--text-muted);">正在生成最新官方二维码...</div>
+            <img id="qrImg" src="" style="display: none;">
+            <a id="qrLink" href="#" target="_blank" style="display: none;">🔗 手机直接打开网页授权</a>
+          </div>
+        </div>
+
+        <!-- 已登录展示区 -->
+        <div id="loggedContainer" class="account-box" style="display: none;">
+          <h3>✅ 账号已授权就绪</h3>
+          <p id="loggedAccountText" style="margin-top: 4px; color: #fff;"></p>
+          <p style="margin-top: 6px; font-size: 11px; color: var(--text-muted);">Token 已安全持久化，无需再次扫码</p>
+          <button class="btn btn-danger" style="margin-top: 12px; font-size: 11px; padding: 4px 10px;" onclick="reloginAccount()">更换/重新登录</button>
         </div>
       </div>
 
@@ -574,12 +604,43 @@ function fetchStatus() {
       document.getElementById('authModal').style.display = 'none';
 
       const lBadge = document.getElementById('loginBadge');
+      const qrContainer = document.getElementById('qrContainer');
+      const loggedContainer = document.getElementById('loggedContainer');
+      const btnRefresh = document.getElementById('btnRefreshQR');
+
       if (data.logged_in) {
         lBadge.className = 'badge badge-online';
         lBadge.innerText = '● 账号已登录: ' + data.user_account;
+        
+        // 核心优化：登录后彻底隐藏二维码区域与刷新按钮，显示已授权卡片
+        qrContainer.style.display = 'none';
+        btnRefresh.style.display = 'none';
+        loggedContainer.style.display = 'block';
+        document.getElementById('loggedAccountText').innerText = '当前账号: ' + data.user_account;
       } else {
         lBadge.className = 'badge badge-warn';
         lBadge.innerText = '▲ 未登录，请先微信/App扫码';
+        qrContainer.style.display = 'block';
+        btnRefresh.style.display = 'inline-flex';
+        loggedContainer.style.display = 'none';
+
+        const placeholder = document.getElementById('qrPlaceholder');
+        const img = document.getElementById('qrImg');
+        const link = document.getElementById('qrLink');
+
+        if (data.qr_img_base64) {
+          placeholder.style.display = 'none';
+          img.src = data.qr_img_base64;
+          img.style.display = 'inline-block';
+          link.href = data.qr_url;
+          link.style.display = 'block';
+        } else if (data.qr_url) {
+          placeholder.style.display = 'none';
+          img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=' + encodeURIComponent(data.qr_url);
+          img.style.display = 'inline-block';
+          link.href = data.qr_url;
+          link.style.display = 'block';
+        }
       }
 
       const badge = document.getElementById('statusBadge');
@@ -593,24 +654,6 @@ function fetchStatus() {
         document.getElementById('currDesktopText').innerText = '当前串流设备: 无';
       }
       document.getElementById('roundCounter').innerText = '第 ' + data.round + ' 轮';
-
-      const placeholder = document.getElementById('qrPlaceholder');
-      const img = document.getElementById('qrImg');
-      const link = document.getElementById('qrLink');
-
-      if (data.qr_img_base64) {
-        placeholder.style.display = 'none';
-        img.src = data.qr_img_base64;
-        img.style.display = 'inline-block';
-        link.href = data.qr_url;
-        link.style.display = 'block';
-      } else if (data.qr_url) {
-        placeholder.style.display = 'none';
-        img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=' + encodeURIComponent(data.qr_url);
-        img.style.display = 'inline-block';
-        link.href = data.qr_url;
-        link.style.display = 'block';
-      }
 
       renderDesktops(data.desktops || [], data.current_desktop);
     }).catch(()=>{});
@@ -701,6 +744,13 @@ function refreshQR(manual) {
   });
 }
 
+function reloginAccount() {
+  if (!confirm('确定注销当前账号并重新扫码吗？')) return;
+  fetch('/api/auth/clear_login', {method: 'POST', headers: getHeaders()}).then(() => {
+    fetchStatus();
+  });
+}
+
 function changePassword() {
   const newPwd = document.getElementById('changeNewPwd').value.trim();
   if (!newPwd) { alert('请输入新密码'); return; }
@@ -770,8 +820,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "running": STATE["running"],
                 "current_desktop": STATE["current_desktop"],
                 "round": STATE["round"],
-                "qr_url": STATE["qr_url"],
-                "qr_img_base64": STATE["qr_img_base64"],
+                "qr_url": STATE["qr_url"] if not STATE["logged_in"] else "",
+                "qr_img_base64": STATE["qr_img_base64"] if not STATE["logged_in"] else "",
                 "desktops": cfg.get("desktops", []),
                 "stay_seconds": cfg.get("stay_seconds", 35)
             }
@@ -827,6 +877,23 @@ class RequestHandler(BaseHTTPRequestHandler):
             AUTH_TOKENS.clear()
             self._send_json({"success": True, "message": "密码修改成功"})
 
+        elif url.path == "/api/auth/clear_login":
+            # 清理登录缓存，允许重新扫码
+            db_path = get_sqlite_path()
+            if db_path and os.path.exists(db_path):
+                try:
+                    conn = sqlite3.connect(db_path)
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM data WHERE name = 'crashAccountData'")
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+            STATE["logged_in"] = False
+            STATE["user_account"] = ""
+            force_generate_new_qr()
+            self._send_json({"success": True, "message": "已重置登录状态"})
+
         elif url.path == "/api/engine":
             action = req_data.get("action")
             if action == "start":
@@ -870,8 +937,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "未知设备操作"}, 400)
 
         elif url.path == "/api/qr/refresh":
-            # 彻底重启官方进程生成崭新二维码
-            force_generate_new_qr()
+            if not STATE["logged_in"]:
+                force_generate_new_qr()
             self._send_json({"success": True, "qr_url": STATE["qr_url"], "qr_img_base64": STATE["qr_img_base64"]})
         else:
             self.send_error(404, "Not Found")
