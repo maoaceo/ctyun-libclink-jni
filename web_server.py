@@ -1067,6 +1067,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Not Found")
 
 def main():
+    global CONFIG_FILE
+    if len(sys.argv) > 1 and sys.argv[1].endswith(".json"):
+        CONFIG_FILE = os.path.abspath(sys.argv[1])
+        
     port = 8572
     cfg = load_config()
     if "port" in cfg:
