@@ -213,6 +213,36 @@ def discover_desktops_from_db():
                         break
         except Exception:
             pass
+    # 如果从当天的日志中没解析出 pageDesktop，则从 SQLite 数据库动态补全
+    if not desktops:
+        db_path = get_sqlite_path()
+        if db_path and os.path.exists(db_path):
+            try:
+                conn = sqlite3.connect(db_path)
+                cur = conn.cursor()
+                cur.execute("SELECT name, value FROM data WHERE name LIKE '%lastConnectDesktopId%'")
+                for row in cur.fetchall():
+                    k, v = row[0], str(row[1]).strip('"').strip("'")
+                    if v and v.isdigit() and len(v) >= 6:
+                        # 查找关联的设备编码
+                        code = v
+                        cur.execute("SELECT name FROM data WHERE name LIKE ? AND name LIKE 'eClassDetailConf_%'", (f'%{v}%',))
+                        e_row = cur.fetchone()
+                        if e_row:
+                            code_match = re.search(r'eClassDetailConf_([A-Za-z0-9]+)', e_row[0])
+                            if code_match:
+                                code = code_match.group(1)
+                        if v not in seen:
+                            seen.add(v)
+                            desktops.append({
+                                "id": v,
+                                "code": code,
+                                "name": f"天翼云电脑 ({code})"
+                            })
+                conn.close()
+            except Exception:
+                pass
+
     return desktops
 
 def parse_code_or_id(input_str):
