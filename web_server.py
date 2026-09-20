@@ -18,18 +18,16 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BIN_DIR = os.path.join(BASE_DIR, "bin")
-if not os.path.exists(BIN_DIR):
-    # 兼容直接使用 /root/ctyun-headless 的情况
-    BIN_DIR = "/root/ctyun-headless"
-
+BIN_DIR = BASE_DIR
 APP_BIN = os.path.join(BIN_DIR, "CtyunStart")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-LOG_DIR = "/root/.local/share/CtyunClouddeskPublic/Log"
+LOG_DIR = os.path.expanduser("~/.local/share/CtyunClouddeskPublic/Log")
 LOG_FILE = os.path.join(BASE_DIR, "robin.log")
 
 # 全局运行状态
 STATE = {
+    "logged_in": False,
+    "user_account": "",
     "running": False,
     "current_desktop": None,
     "round": 0,
@@ -44,13 +42,7 @@ DEFAULT_CONFIG = {
     "port": 8572,
     "stay_seconds": 35,
     "switch_gap": 3,
-    "desktops": [
-        {
-            "id": "23798068",
-            "name": "天翼云电脑游戏版",
-            "code": "D0026091923798068"
-        }
-    ]
+    "desktops": []
 }
 
 def load_config():
@@ -76,11 +68,38 @@ def append_log(msg):
     except Exception:
         pass
 
-def get_sqlite_path(home_dir="/root"):
+def get_sqlite_path(home_dir=None):
+    if not home_dir:
+        home_dir = os.path.expanduser("~")
     dbs = glob.glob(os.path.join(home_dir, ".local/share/CtyunClouddeskPublic/QML/OfflineStorage/Databases/*.sqlite"))
     return dbs[0] if dbs else None
 
-def set_target_desktop_in_db(desktop_id, home_dir="/root"):
+def check_login_status():
+    """检查本地数据库是否已经登录成功账号"""
+    db_path = get_sqlite_path()
+    if not db_path or not os.path.exists(db_path):
+        STATE["logged_in"] = False
+        STATE["user_account"] = ""
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM data WHERE name = 'crashAccountData'")
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            acc_info = json.loads(row[0])
+            acc = acc_info.get("userAccount") or acc_info.get("email") or "已登录"
+            STATE["logged_in"] = True
+            STATE["user_account"] = acc
+            return True
+    except Exception:
+        pass
+    STATE["logged_in"] = False
+    STATE["user_account"] = ""
+    return False
+
+def set_target_desktop_in_db(desktop_id, home_dir=None):
     db_path = get_sqlite_path(home_dir)
     if not db_path:
         return False
@@ -105,47 +124,66 @@ def stop_active_client():
     subprocess.run("pkill -f 'Xvfb' 2>/dev/null || true", shell=True)
     time.sleep(1)
 
+def ensure_client_running_for_qr():
+    """未登录时，保证官方客户端运行以产出最新登录二维码"""
+    out = subprocess.check_output("pgrep -f 'clouddesktop-qml' || true", shell=True).strip()
+    if not out:
+        cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_login.log 2>&1 &'
+        subprocess.Popen(cmd, shell=True, executable="/bin/bash")
+        time.sleep(2)
+
 def check_qr_from_logs():
+    """从官方客户端日志解析最新的扫码二维码 URL 并生成图片"""
     today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
     if os.path.exists(today_log):
         try:
             with open(today_log, "r", encoding="utf-8", errors="ignore") as f:
                 c = f.read()
-            matches = re.findall(r'https://desk\.ctyun\.cn[^ ]+loginMode=1[^ ]*', c)
+            matches = re.findall(r'https://desk\.ctyun\.cn[^ "]+loginMode=1[^ "]*', c)
             if matches:
                 url = matches[-1]
-                STATE["qr_url"] = url
-                # 生成 base64 图片
-                try:
-                    import base64
-                    png_path = "/tmp/web_qr.png"
-                    subprocess.run(f'qrencode -s 6 -o "{png_path}" "{url}"', shell=True)
-                    if os.path.exists(png_path):
-                        b64 = base64.b64encode(open(png_path, "rb").read()).decode()
-                        STATE["qr_img_base64"] = f"data:image/png;base64,{b64}"
-                except Exception:
-                    pass
+                if url != STATE["qr_url"]:
+                    STATE["qr_url"] = url
+                    # 生成 base64 图片
+                    try:
+                        import base64
+                        png_path = "/tmp/web_qr.png"
+                        subprocess.run(f'qrencode -s 6 -o "{png_path}" "{url}"', shell=True)
+                        if os.path.exists(png_path):
+                            b64 = base64.b64encode(open(png_path, "rb").read()).decode()
+                            STATE["qr_img_base64"] = f"data:image/png;base64,{b64}"
+                    except Exception:
+                        pass
         except Exception:
             pass
 
 def round_robin_worker():
-    append_log("🚀 官方 Clink / QUIC 原生多设备轮询保活引擎已启动！")
+    append_log("🚀 官方 Clink / QUIC 原生多设备轮询引擎已就绪！")
     STATE["running"] = True
     STATE["should_stop"] = False
     
     while not STATE["should_stop"]:
+        # 1. 检查是否登录
+        if not check_login_status():
+            STATE["current_desktop"] = "⚠️ 等待手机扫码登录"
+            check_qr_from_logs()
+            ensure_client_running_for_qr()
+            time.sleep(2)
+            continue
+
+        # 2. 检查是否有配置云电脑
         cfg = load_config()
         desktops = cfg.get("desktops", [])
         if not desktops:
-            append_log("⚠️ 当前轮询列表为空，等待添加设备...")
-            time.sleep(5)
+            STATE["current_desktop"] = "⚠️ 请在控制台添加云电脑设备ID"
+            time.sleep(3)
             continue
             
         stay_sec = int(cfg.get("stay_seconds", 35))
         switch_gap = int(cfg.get("switch_gap", 3))
         STATE["round"] += 1
         round_num = STATE["round"]
-        append_log(f"🔄 === 开始第 {round_num} 轮多设备巡检 ({len(desktops)} 台) ===")
+        append_log(f"🔄 === 开始第 {round_num} 轮多设备巡检 (共 {len(desktops)} 台) ===")
         
         for idx, d in enumerate(desktops, 1):
             if STATE["should_stop"]:
@@ -191,7 +229,6 @@ def round_robin_worker():
             while waited < stay_sec and not STATE["should_stop"]:
                 time.sleep(1)
                 waited += 1
-                check_qr_from_logs()
                 
             stop_active_client()
             append_log(f"  -> ✨ [{d_name}] 闲置倒计时已重置！准备轮换...")
@@ -202,7 +239,7 @@ def round_robin_worker():
     STATE["current_desktop"] = None
     append_log("⏹️ 轮询引擎已停止。")
 
-# HTML Web UI 模版 (精美ACG二次元与现代化暗色毛玻璃风格)
+# HTML Web UI 模版 (二次元/暗色毛玻璃设计)
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -242,13 +279,15 @@ header {
 .title-group h1 { font-size: 24px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 10px; }
 .title-group p { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
 .badge {
-  padding: 4px 10px;
+  padding: 5px 12px;
   border-radius: 20px;
   font-size: 12px;
   font-weight: 600;
+  display: inline-block;
 }
 .badge-online { background: rgba(0,230,118,0.15); color: var(--success); border: 1px solid var(--success); }
 .badge-offline { background: rgba(255,82,82,0.15); color: var(--danger); border: 1px solid var(--danger); }
+.badge-warn { background: rgba(255,171,0,0.15); color: var(--warn); border: 1px solid var(--warn); }
 
 .grid { display: grid; grid-template-columns: 360px 1fr; gap: 24px; }
 @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
@@ -349,7 +388,8 @@ header {
       <h1>✨ 天翼云 Clink 原生多设备轮询保活</h1>
       <p>官方 Linux 视讯串流内核 (QUIC/Clink) · 纯无头运行 · 5分钟超时防关机</p>
     </div>
-    <div>
+    <div style="display: flex; gap: 10px; align-items: center;">
+      <span id="loginBadge" class="badge badge-warn">检查登录状态中...</span>
       <span id="statusBadge" class="badge badge-offline">未连接</span>
     </div>
   </header>
@@ -357,29 +397,30 @@ header {
   <div class="grid">
     <!-- 左侧控制面板 -->
     <div class="sidebar">
-      <div class="card">
-        <div class="card-header">
-          <span>🎮 轮询引擎控制</span>
-          <span id="roundCounter" style="font-size: 12px; color: var(--text-muted);">第 0 轮</span>
-        </div>
-        <p id="currDesktopText" style="font-size: 13px; margin-bottom: 16px; color: var(--text-muted);">当前串流设备: 无</p>
-        <div style="display: flex; gap: 10px;">
-          <button id="btnStart" class="btn btn-primary" onclick="toggleEngine(true)">启动轮询保活</button>
-          <button id="btnStop" class="btn btn-danger" onclick="toggleEngine(false)">停止</button>
-        </div>
-      </div>
-
       <!-- 手机扫码登录 -->
       <div class="card">
         <div class="card-header">
-          <span>📱 手机扫码授权</span>
+          <span>📱 手机扫码授权登录</span>
           <button class="btn btn-primary" style="padding: 4px 10px; font-size: 12px;" onclick="refreshQR()">刷新二维码</button>
         </div>
         <p style="font-size: 12px; color: var(--text-muted);">打开天翼云电脑 App 或微信扫码确认登录：</p>
         <div class="qr-box">
-          <div id="qrPlaceholder" style="padding: 30px; font-size: 12px; color: var(--text-muted);">正在获取二维码...</div>
+          <div id="qrPlaceholder" style="padding: 30px; font-size: 12px; color: var(--text-muted);">正在获取最新官方二维码...</div>
           <img id="qrImg" src="" style="display: none;">
-          <a id="qrLink" href="#" target="_blank" style="display: none;">🔗 点击直接打开网页确认</a>
+          <a id="qrLink" href="#" target="_blank" style="display: none;">🔗 手机直接打开网页授权</a>
+        </div>
+      </div>
+
+      <!-- 控制面板 -->
+      <div class="card">
+        <div class="card-header">
+          <span>🎮 轮询保活控制</span>
+          <span id="roundCounter" style="font-size: 12px; color: var(--text-muted);">第 0 轮</span>
+        </div>
+        <p id="currDesktopText" style="font-size: 13px; margin-bottom: 16px; color: var(--text-muted);">当前串流设备: 无</p>
+        <div style="display: flex; gap: 10px;">
+          <button id="btnStart" class="btn btn-primary" onclick="toggleEngine(true)">启动轮询</button>
+          <button id="btnStop" class="btn btn-danger" onclick="toggleEngine(false)">停止</button>
         </div>
       </div>
 
@@ -411,9 +452,7 @@ header {
           <span>🖥️ 轮询设备列表 (<span id="devCount">0</span> 台)</span>
           <span style="font-size: 12px; color: var(--text-muted);">单台保持: 35s | 切换: 3s</span>
         </div>
-        <div id="deviceList">
-          <!-- 动态渲染 -->
-        </div>
+        <div id="deviceList"></div>
       </div>
 
       <div class="card" style="margin-bottom: 0;">
@@ -430,10 +469,21 @@ header {
 <script>
 function fetchStatus() {
   fetch('/api/status').then(r => r.json()).then(data => {
+    // 登录状态
+    const lBadge = document.getElementById('loginBadge');
+    if (data.logged_in) {
+      lBadge.className = 'badge badge-online';
+      lBadge.innerText = '● 账号已登录: ' + data.user_account;
+    } else {
+      lBadge.className = 'badge badge-warn';
+      lBadge.innerText = '▲ 未登录，请先微信/App扫码';
+    }
+
+    // 运行状态
     const badge = document.getElementById('statusBadge');
     if (data.running) {
       badge.className = 'badge badge-online';
-      badge.innerText = '● 正在轮询串流保活';
+      badge.innerText = '● 正在轮询保活';
       document.getElementById('currDesktopText').innerHTML = '当前串流: <b style="color: var(--primary);">' + (data.current_desktop || '连接中...') + '</b>';
     } else {
       badge.className = 'badge badge-offline';
@@ -562,8 +612,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_html(HTML_PAGE)
         elif url.path == "/api/status":
             cfg = load_config()
+            check_login_status()
             check_qr_from_logs()
             data = {
+                "logged_in": STATE["logged_in"],
+                "user_account": STATE["user_account"],
                 "running": STATE["running"],
                 "current_desktop": STATE["current_desktop"],
                 "round": STATE["round"],
@@ -622,7 +675,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                 new_name = str(req_data.get("name", "云电脑")).strip()
                 new_code = str(req_data.get("code", new_id)).strip()
                 
-                # 去重
                 if any(str(d.get("id")) == new_id for d in desktops):
                     self._send_json({"error": f"云电脑 ID [{new_id}] 已经在列表中"}, 400)
                     return
@@ -655,7 +707,7 @@ def main():
     server = HTTPServer(("0.0.0.0", port), RequestHandler)
     append_log(f"🌐 天翼云 Clink 原生多设备控制中心已启动！控制台端口: http://0.0.0.0:{port}")
     
-    # 自动在后台启动轮询
+    # 自动在后台启动守护
     t = threading.Thread(target=round_robin_worker, daemon=True)
     t.start()
     STATE["engine_thread"] = t
