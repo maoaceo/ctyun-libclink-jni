@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-天翼云电脑 Clink 原生多设备轮询与 Web 控制台服务
-Web Dashboard with QR Login, Desktop ID Management & Real-Time Clink Logs
+天翼云电脑 Clink 原生多设备轮询与 Web 安全控制台服务
+Web Dashboard with Admin Password Protection, QR Login & Clink Logs
 """
 
 import os
@@ -14,6 +14,7 @@ import subprocess
 import glob
 import re
 import threading
+import hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
@@ -38,18 +39,26 @@ STATE = {
     "qr_img_base64": ""
 }
 
+# 默认基础配置 (默认登录密码: 123456)
 DEFAULT_CONFIG = {
     "port": 8572,
+    "admin_password": "admin",  # Web 登录保护密码
     "stay_seconds": 35,
     "switch_gap": 3,
     "desktops": []
 }
 
+# 简单的 Session 认证 Token 缓存
+AUTH_TOKENS = set()
+
 def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                cfg = json.load(f)
+                if "admin_password" not in cfg:
+                    cfg["admin_password"] = "admin"
+                return cfg
         except Exception:
             pass
     return DEFAULT_CONFIG
@@ -75,7 +84,6 @@ def get_sqlite_path(home_dir=None):
     return dbs[0] if dbs else None
 
 def check_login_status():
-    """检查本地数据库是否已经登录成功账号"""
     db_path = get_sqlite_path()
     if not db_path or not os.path.exists(db_path):
         STATE["logged_in"] = False
@@ -125,7 +133,6 @@ def stop_active_client():
     time.sleep(1)
 
 def ensure_client_running_for_qr():
-    """未登录时，保证官方客户端运行以产出最新登录二维码"""
     try:
         out = subprocess.check_output("pgrep -f 'clouddesktop-qml' || true", shell=True).strip()
         if not out:
@@ -136,7 +143,6 @@ def ensure_client_running_for_qr():
         pass
 
 def check_qr_from_logs():
-    """从官方客户端日志解析最新的扫码二维码 URL 并生成 Base64 图片"""
     today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
     if os.path.exists(today_log):
         try:
@@ -151,7 +157,6 @@ def check_qr_from_logs():
                         url = matches[0].strip()
                         if url != STATE["qr_url"] or not STATE["qr_img_base64"]:
                             STATE["qr_url"] = url
-                            # 调用 qrencode CLI 生成图片
                             try:
                                 import base64
                                 png_path = "/tmp/web_qr.png"
@@ -160,9 +165,9 @@ def check_qr_from_logs():
                                     with open(png_path, "rb") as bf:
                                         b64 = base64.b64encode(bf.read()).decode()
                                     STATE["qr_img_base64"] = f"data:image/png;base64,{b64}"
-                                    append_log("📱 已成功捕获并生成官方最新扫码二维码！")
-                            except Exception as ex:
-                                append_log(f"生成二维码图片异常: {ex}")
+                                    append_log("📱 已成功生成官方最新扫码登录二维码！")
+                            except Exception:
+                                pass
                         break
         except Exception:
             pass
@@ -173,7 +178,6 @@ def round_robin_worker():
     STATE["should_stop"] = False
     
     while not STATE["should_stop"]:
-        # 1. 检查是否登录
         if not check_login_status():
             STATE["current_desktop"] = "⚠️ 等待手机扫码登录"
             ensure_client_running_for_qr()
@@ -181,11 +185,10 @@ def round_robin_worker():
             time.sleep(3)
             continue
 
-        # 2. 检查是否有配置云电脑
         cfg = load_config()
         desktops = cfg.get("desktops", [])
         if not desktops:
-            STATE["current_desktop"] = "⚠️ 登录成功！请在上方添加云电脑设备ID"
+            STATE["current_desktop"] = "⚠️ 登录成功！请添加云电脑设备ID"
             time.sleep(3)
             continue
             
@@ -207,12 +210,10 @@ def round_robin_worker():
             append_log(f"[{idx}/{len(desktops)}] 正在连接: [{d_name}] (ID: {d_id} / {d_code})...")
             set_target_desktop_in_db(d_id)
             
-            # 启动无头客户端
             stop_active_client()
             cmd = f'nohup xvfb-run -a -s "-screen 0 1024x768x16 -nolisten tcp" "{APP_BIN}" > /tmp/ctyun_runner.log 2>&1 &'
             subprocess.Popen(cmd, shell=True, executable="/bin/bash")
             
-            # 等待串流握手
             connected = False
             today_log = f"{LOG_DIR}/{time.strftime('%Y-%m-%d')}.log"
             for _ in range(12):
@@ -233,7 +234,6 @@ def round_robin_worker():
             else:
                 append_log(f"  -> ⏳ 正在保持视讯连接 ({stay_sec} 秒)...")
                 
-            # 保持阶段
             waited = 0
             while waited < stay_sec and not STATE["should_stop"]:
                 time.sleep(1)
@@ -248,7 +248,7 @@ def round_robin_worker():
     STATE["current_desktop"] = None
     append_log("⏹️ 轮询引擎已停止。")
 
-# HTML Web UI 模版 (二次元/暗色毛玻璃设计，内置高容错在线二维码展示)
+# HTML Web UI 模版 (内置密码保护验证弹层与修改密码)
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -388,9 +388,35 @@ header {
   word-break: break-all;
   line-height: 1.6;
 }
+
+/* 登录弹层 */
+#authModal {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(8, 9, 14, 0.85); backdrop-filter: blur(12px);
+  display: flex; align-items: center; justify-content: center; z-index: 9999;
+}
+.login-card {
+  width: 360px; background: var(--card-bg); border: 1px solid var(--border);
+  border-radius: 16px; padding: 28px; box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+  text-align: center;
+}
 </style>
 </head>
 <body>
+
+<!-- 访问密码验证弹窗 -->
+<div id="authModal" style="display: none;">
+  <div class="login-card">
+    <h2 style="color: var(--primary); font-size: 20px; margin-bottom: 8px;">🔐 管理访问验证</h2>
+    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 20px;">本控制面板受密码保护，请输入访问密码：</p>
+    <div class="form-group" style="text-align: left;">
+      <input type="password" id="adminPwd" class="form-control" placeholder="默认密码: admin" onkeydown="if(event.keyCode===13)verifyLogin()">
+    </div>
+    <button class="btn btn-primary" style="width: 100%; justify-content: center; margin-top: 8px;" onclick="verifyLogin()">进入控制中心</button>
+    <p id="pwdErr" style="color: var(--danger); font-size: 12px; margin-top: 10px; display: none;">密码错误，请重新输入</p>
+  </div>
+</div>
+
 <div class="container">
   <header>
     <div class="title-group">
@@ -400,6 +426,7 @@ header {
     <div style="display: flex; gap: 10px; align-items: center;">
       <span id="loginBadge" class="badge badge-warn">检查登录状态中...</span>
       <span id="statusBadge" class="badge badge-offline">未连接</span>
+      <button class="btn btn-danger" style="padding: 4px 10px; font-size: 12px;" onclick="logout()">锁定退出</button>
     </div>
   </header>
 
@@ -452,6 +479,18 @@ header {
         </div>
         <button class="btn btn-primary" style="width: 100%; justify-content: center;" onclick="addDesktop()">添加到轮询队列</button>
       </div>
+
+      <!-- 修改访问密码 -->
+      <div class="card">
+        <div class="card-header">
+          <span>🔑 安全设置 (修改Web密码)</span>
+        </div>
+        <div class="form-group">
+          <label>新访问密码</label>
+          <input type="password" id="changeNewPwd" class="form-control" placeholder="设置新密码">
+        </div>
+        <button class="btn btn-primary" style="width: 100%; justify-content: center;" onclick="changePassword()">保存新密码</button>
+      </div>
     </div>
 
     <!-- 右侧设备列表与实时日志 -->
@@ -476,53 +515,101 @@ header {
 </div>
 
 <script>
+let authToken = localStorage.getItem('ctyun_auth_token') || '';
+
+function getHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    'X-Auth-Token': authToken
+  };
+}
+
+function verifyLogin() {
+  const pwd = document.getElementById('adminPwd').value;
+  fetch('/api/auth/login', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({password: pwd})
+  }).then(r => r.json()).then(res => {
+    if (res.success && res.token) {
+      authToken = res.token;
+      localStorage.setItem('ctyun_auth_token', authToken);
+      document.getElementById('authModal').style.display = 'none';
+      document.getElementById('pwdErr').style.display = 'none';
+      fetchStatus();
+      fetchLogs();
+    } else {
+      document.getElementById('pwdErr').style.display = 'block';
+    }
+  });
+}
+
+function logout() {
+  localStorage.removeItem('ctyun_auth_token');
+  authToken = '';
+  document.getElementById('authModal').style.display = 'flex';
+}
+
+function checkAuth(r) {
+  if (r.status === 401) {
+    document.getElementById('authModal').style.display = 'flex';
+    return null;
+  }
+  return r;
+}
+
 function fetchStatus() {
-  fetch('/api/status').then(r => r.json()).then(data => {
-    // 登录状态
-    const lBadge = document.getElementById('loginBadge');
-    if (data.logged_in) {
-      lBadge.className = 'badge badge-online';
-      lBadge.innerText = '● 账号已登录: ' + data.user_account;
-    } else {
-      lBadge.className = 'badge badge-warn';
-      lBadge.innerText = '▲ 未登录，请先微信/App扫码';
-    }
+  fetch('/api/status', {headers: getHeaders()})
+    .then(r => checkAuth(r))
+    .then(r => r ? r.json() : null)
+    .then(data => {
+      if (!data) return;
+      document.getElementById('authModal').style.display = 'none';
 
-    // 运行状态
-    const badge = document.getElementById('statusBadge');
-    if (data.running) {
-      badge.className = 'badge badge-online';
-      badge.innerText = '● 正在轮询保活';
-      document.getElementById('currDesktopText').innerHTML = '当前串流: <b style="color: var(--primary);">' + (data.current_desktop || '连接中...') + '</b>';
-    } else {
-      badge.className = 'badge badge-offline';
-      badge.innerText = '○ 已停止';
-      document.getElementById('currDesktopText').innerText = '当前串流设备: 无';
-    }
-    document.getElementById('roundCounter').innerText = '第 ' + data.round + ' 轮';
+      // 登录状态
+      const lBadge = document.getElementById('loginBadge');
+      if (data.logged_in) {
+        lBadge.className = 'badge badge-online';
+        lBadge.innerText = '● 账号已登录: ' + data.user_account;
+      } else {
+        lBadge.className = 'badge badge-warn';
+        lBadge.innerText = '▲ 未登录，请先微信/App扫码';
+      }
 
-    // 二维码展示（若后端已生成 Base64 则优先使用，否则用第三方 API 渲染）
-    const placeholder = document.getElementById('qrPlaceholder');
-    const img = document.getElementById('qrImg');
-    const link = document.getElementById('qrLink');
+      // 运行状态
+      const badge = document.getElementById('statusBadge');
+      if (data.running) {
+        badge.className = 'badge badge-online';
+        badge.innerText = '● 正在轮询保活';
+        document.getElementById('currDesktopText').innerHTML = '当前串流: <b style="color: var(--primary);">' + (data.current_desktop || '连接中...') + '</b>';
+      } else {
+        badge.className = 'badge badge-offline';
+        badge.innerText = '○ 已停止';
+        document.getElementById('currDesktopText').innerText = '当前串流设备: 无';
+      }
+      document.getElementById('roundCounter').innerText = '第 ' + data.round + ' 轮';
 
-    if (data.qr_img_base64) {
-      placeholder.style.display = 'none';
-      img.src = data.qr_img_base64;
-      img.style.display = 'inline-block';
-      link.href = data.qr_url;
-      link.style.display = 'block';
-    } else if (data.qr_url) {
-      placeholder.style.display = 'none';
-      img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=' + encodeURIComponent(data.qr_url);
-      img.style.display = 'inline-block';
-      link.href = data.qr_url;
-      link.style.display = 'block';
-    }
+      // 二维码展示
+      const placeholder = document.getElementById('qrPlaceholder');
+      const img = document.getElementById('qrImg');
+      const link = document.getElementById('qrLink');
 
-    // 渲染设备列表
-    renderDesktops(data.desktops || [], data.current_desktop);
-  }).catch(()=>{});
+      if (data.qr_img_base64) {
+        placeholder.style.display = 'none';
+        img.src = data.qr_img_base64;
+        img.style.display = 'inline-block';
+        link.href = data.qr_url;
+        link.style.display = 'block';
+      } else if (data.qr_url) {
+        placeholder.style.display = 'none';
+        img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=' + encodeURIComponent(data.qr_url);
+        img.style.display = 'inline-block';
+        link.href = data.qr_url;
+        link.style.display = 'block';
+      }
+
+      renderDesktops(data.desktops || [], data.current_desktop);
+    }).catch(()=>{});
 }
 
 function renderDesktops(list, curr) {
@@ -549,17 +636,21 @@ function renderDesktops(list, curr) {
 }
 
 function fetchLogs() {
-  fetch('/api/logs').then(r => r.text()).then(t => {
-    const box = document.getElementById('logTerminal');
-    box.innerText = t || '暂无日志输出';
-    box.scrollTop = box.scrollHeight;
-  }).catch(()=>{});
+  fetch('/api/logs', {headers: getHeaders()})
+    .then(r => checkAuth(r))
+    .then(r => r ? r.text() : null)
+    .then(t => {
+      if (t === null) return;
+      const box = document.getElementById('logTerminal');
+      box.innerText = t || '暂无日志输出';
+      box.scrollTop = box.scrollHeight;
+    }).catch(()=>{});
 }
 
 function toggleEngine(start) {
   fetch('/api/engine', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: getHeaders(),
     body: JSON.stringify({action: start ? 'start' : 'stop'})
   }).then(() => {
     setTimeout(fetchStatus, 500);
@@ -574,7 +665,7 @@ function addDesktop() {
   if (!id) { alert('请输入云电脑 ID'); return; }
   fetch('/api/desktops', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: getHeaders(),
     body: JSON.stringify({action: 'add', id, name, code})
   }).then(r => r.json()).then(res => {
     if (res.error) alert(res.error);
@@ -589,21 +680,44 @@ function removeDesktop(id) {
   if (!confirm('确定移除该云电脑保活吗？')) return;
   fetch('/api/desktops', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: getHeaders(),
     body: JSON.stringify({action: 'remove', id})
   }).then(() => fetchStatus());
 }
 
 function refreshQR() {
-  fetch('/api/qr/refresh', {method: 'POST'}).then(() => {
+  fetch('/api/qr/refresh', {method: 'POST', headers: getHeaders()}).then(() => {
     setTimeout(fetchStatus, 1500);
   });
 }
 
-setInterval(fetchStatus, 2500);
-setInterval(fetchLogs, 3000);
-fetchStatus();
-fetchLogs();
+function changePassword() {
+  const newPwd = document.getElementById('changeNewPwd').value.trim();
+  if (!newPwd) { alert('请输入新密码'); return; }
+  fetch('/api/auth/change_password', {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({new_password: newPwd})
+  }).then(r => r.json()).then(res => {
+    if (res.success) {
+      alert('密码修改成功！请重新登录。');
+      logout();
+    } else {
+      alert('修改失败: ' + (res.error || '未知错误'));
+    }
+  });
+}
+
+// 初始化校验
+if (!authToken) {
+  document.getElementById('authModal').style.display = 'flex';
+} else {
+  fetchStatus();
+  fetchLogs();
+}
+
+setInterval(() => { if (authToken) fetchStatus(); }, 2500);
+setInterval(() => { if (authToken) fetchLogs(); }, 3000);
 </script>
 </body>
 </html>
@@ -623,11 +737,22 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(html.encode("utf-8"))
 
+    def _is_authenticated(self):
+        token = self.headers.get("X-Auth-Token", "")
+        return token in AUTH_TOKENS
+
     def do_GET(self):
         url = urlparse(self.path)
         if url.path == "/" or url.path == "/index.html":
             self._send_html(HTML_PAGE)
-        elif url.path == "/api/status":
+            return
+
+        # 保护 API 需要 Token 认证
+        if not self._is_authenticated():
+            self._send_json({"error": "未登录或登录已过期", "need_auth": True}, 401)
+            return
+
+        if url.path == "/api/status":
             cfg = load_config()
             check_login_status()
             check_qr_from_logs()
@@ -667,7 +792,36 @@ class RequestHandler(BaseHTTPRequestHandler):
         except Exception:
             req_data = {}
 
-        if url.path == "/api/engine":
+        # 1. Web 密码登录接口（无需预先带 Token）
+        if url.path == "/api/auth/login":
+            cfg = load_config()
+            pwd = req_data.get("password", "")
+            expected = cfg.get("admin_password", "admin")
+            if pwd == expected:
+                token = hashlib.sha256(f"{pwd}:{time.time()}:{os.urandom(8)}".encode()).hexdigest()
+                AUTH_TOKENS.add(token)
+                self._send_json({"success": True, "token": token})
+            else:
+                self._send_json({"error": "密码错误"}, 403)
+            return
+
+        # 其他 POST API 需要验证访问 Token
+        if not self._is_authenticated():
+            self._send_json({"error": "未登录或登录已过期", "need_auth": True}, 401)
+            return
+
+        if url.path == "/api/auth/change_password":
+            new_pwd = req_data.get("new_password", "").strip()
+            if not new_pwd:
+                self._send_json({"error": "新密码不能为空"}, 400)
+                return
+            cfg = load_config()
+            cfg["admin_password"] = new_pwd
+            save_config(cfg)
+            AUTH_TOKENS.clear() # 清空所有旧登录凭据
+            self._send_json({"success": True, "message": "密码修改成功"})
+
+        elif url.path == "/api/engine":
             action = req_data.get("action")
             if action == "start":
                 if not STATE["running"]:
