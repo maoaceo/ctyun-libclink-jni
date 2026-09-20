@@ -143,51 +143,30 @@ def check_login_status():
     return False
 
 def discover_desktops_from_db():
-    discovered = []
+    """仅从当前最新一次登录成功后官方机房返回的 pageDesktop 中提取真实机器，绝不混入历史遗留机器"""
+    today_log = os.path.join(LOG_DIR, f"{time.strftime('%Y-%m-%d')}.log")
+    desktops = []
     seen = set()
-
-    # 1. 优先扫描官方客户端运行日志 (包含完整云电脑名称与objId)
-    log_files = glob.glob(os.path.join(LOG_DIR, "*.log"))
-    for fn in log_files:
+    if os.path.exists(today_log):
         try:
-            with open(fn, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    if "resolveNormalDesktop" in line or "首页加载桌面列表" in line or "pageDesktop" in line:
-                        matches = re.findall(r'"objId":"(\d+)".*?"objName":"([^"]+)"', line)
-                        for did, dname in matches:
-                            if did not in seen:
-                                seen.add(did)
-                                discovered.append({
-                                    "id": did,
-                                    "code": f"D00...{did}",
-                                    "name": f"{dname} ({did})"
-                                })
+            with open(today_log, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+            for line in reversed(lines):
+                if "api/desktop/client/pageDesktop" in line or "首页加载桌面列表" in line:
+                    matches = re.findall(r'"objId":"(\d+)".*?"objName":"([^"]+)"', line)
+                    for did, dname in matches:
+                        if did not in seen:
+                            seen.add(did)
+                            desktops.append({
+                                "id": did,
+                                "code": f"D00...{did}",
+                                "name": f"{dname} ({did})"
+                            })
+                    if desktops:
+                        break
         except Exception:
             pass
-
-    # 2. 从本地 SQLite 数据库扫描补充
-    db_path = get_sqlite_path()
-    if db_path and os.path.exists(db_path):
-        try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute("SELECT name, value FROM data WHERE name LIKE '%regionProperties%' OR name LIKE '%lastConnectDesktopId%'")
-            rows = cur.fetchall()
-            for r in rows:
-                val_str = str(r[1])
-                ids = re.findall(r'(\d{7,10})', val_str)
-                for did in ids:
-                    if did not in seen:
-                        seen.add(did)
-                        discovered.append({
-                            "id": did,
-                            "code": f"D00...{did}",
-                            "name": f"天翼云电脑 ({did})"
-                        })
-            conn.close()
-        except Exception:
-            pass
-    return discovered
+    return desktops
 
 def parse_code_or_id(input_str):
     s = str(input_str).strip()
