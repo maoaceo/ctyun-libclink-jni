@@ -14,13 +14,15 @@ $Desktops = @(
 )
 # ----------------------------------------------------
 
-# 自动注册 Windows 开机自启服务 (计划任务 SYSTEM/用户级别守护)
+# 自动注册 Windows 开机自启服务 (计划任务静默守护)
 function Enable-StartupTask {
     $TaskName = "CtyunKeepAliveWatchdog"
     $Existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if (-not $Existing) {
         try {
-            $ScriptLocal = "$env:LOCALAPPDATA\CtyunClouddeskPublic\ctyun_keepalive.ps1"
+            $TargetDir = "$env:LOCALAPPDATA\CtyunClouddeskPublic"
+            if (-not (Test-Path $TargetDir)) { New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null }
+            $ScriptLocal = "$TargetDir\ctyun_keepalive.ps1"
             [System.IO.File]::WriteAllText($ScriptLocal, $MyInvocation.MyCommand.ScriptBlock.ToString(), [System.Text.Encoding]::UTF8)
             
             $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$ScriptLocal`""
@@ -44,14 +46,14 @@ Write-Host "================================================================" -F
 # 1. 自动定位官方客户端主程序
 $ClientExe = ""
 $PossiblePaths = @(
-    "C:\Program Files (x86)\CtyunClouddeskPublic\clouddesktop-qml.exe",
+    "C:\Program Files\CtyunClouddeskPublic\bin\clouddesktop-qml.exe",
+    "C:\Program Files (x86)\CtyunClouddeskPublic\bin\clouddesktop-qml.exe",
     "C:\Program Files\CtyunClouddeskPublic\clouddesktop-qml.exe",
-    "$env:ProgramFiles(x86)\CtyunClouddeskPublic\clouddesktop-qml.exe",
-    "$env:ProgramFiles\CtyunClouddeskPublic\clouddesktop-qml.exe",
+    "C:\Program Files (x86)\CtyunClouddeskPublic\clouddesktop-qml.exe",
+    "$env:ProgramFiles\CtyunClouddeskPublic\bin\clouddesktop-qml.exe",
+    "$env:ProgramFiles(x86)\CtyunClouddeskPublic\bin\clouddesktop-qml.exe",
     "$env:LOCALAPPDATA\Programs\CtyunClouddeskPublic\clouddesktop-qml.exe",
-    "$env:APPDATA\CtyunClouddeskPublic\clouddesktop-qml.exe",
-    "D:\Program Files (x86)\CtyunClouddeskPublic\clouddesktop-qml.exe",
-    "D:\Program Files\CtyunClouddeskPublic\clouddesktop-qml.exe"
+    "$env:APPDATA\CtyunClouddeskPublic\clouddesktop-qml.exe"
 )
 
 foreach ($p in $PossiblePaths) {
@@ -67,24 +69,45 @@ if (-not $ClientExe) {
 }
 
 if (-not $ClientExe) {
-    Write-Host "[X] 未检测到官方客户端安装目录！" -ForegroundColor Red
-    Write-Host "    请确认已安装天翼云电脑官方 Windows 客户端。" -ForegroundColor Yellow
+    Write-Host "[X] 未检测到官方客户端主程序！" -ForegroundColor Red
     return
 }
 
 Write-Host "[+] 官方客户端: $ClientExe" -ForegroundColor Green
 
-# 2. 定位本地离线配置数据库
-$DbDir = "$env:LOCALAPPDATA\CtyunClouddeskPublic\QML\OfflineStorage\Databases"
-$SqliteFile = Get-ChildItem -Path $DbDir -Filter "*.sqlite" -ErrorAction SilentlyContinue | Select-Object -First 1
+# 2. 全盘精准搜索本地离线配置数据库 (*.sqlite)
+$DbPath = ""
+$PossibleDbPaths = @(
+    "$env:LOCALAPPDATA\CtyunClouddeskPublic\QML\OfflineStorage\Databases\*.sqlite",
+    "$env:APPDATA\CtyunClouddeskPublic\QML\OfflineStorage\Databases\*.sqlite",
+    "$env:USERPROFILE\.local\share\CtyunClouddeskPublic\QML\OfflineStorage\Databases\*.sqlite",
+    "$env:LOCALAPPDATA\Ctyun*\*.sqlite",
+    "$env:APPDATA\Ctyun*\*.sqlite"
+)
 
-if (-not $SqliteFile) {
-    Write-Host "[X] 未找到客户端本地数据库文件，请先在官方客户端上登录一次你的账号！" -ForegroundColor Red
+foreach ($pattern in $PossibleDbPaths) {
+    $found = Get-ChildItem -Path $pattern -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 10000 } | Select-Object -First 1
+    if ($found) {
+        $DbPath = $found.FullName
+        break
+    }
+}
+
+# 深度搜索兜底 (若上述固定目录未找到)
+if (-not $DbPath) {
+    Write-Host "[*] 正在扫描本地客户端用户数据，请稍候..." -ForegroundColor Gray
+    $found = Get-ChildItem -Path "$env:LOCALAPPDATA", "$env:APPDATA" -Filter "*.sqlite" -Recurse -Depth 4 -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like "*Ctyun*" -or $_.FullName -like "*clink*" } | Select-Object -First 1
+    if ($found) { $DbPath = $found.FullName }
+}
+
+if (-not $DbPath) {
+    Write-Host "`n[!] 提示: 未检测到已登录的本地离线数据库缓存。" -ForegroundColor Yellow
+    Write-Host "    请先在桌面手动双击打开天翼云电脑客户端，使用微信/手机号登录一次账号。" -ForegroundColor White
+    Write-Host "    登录成功后，重新执行本命令即可！" -ForegroundColor Cyan
     return
 }
 
-$DbPath = $SqliteFile.FullName
-Write-Host "[+] 本地数据库: $DbPath" -ForegroundColor Green
+Write-Host "[+] 本地配置数据库: $DbPath" -ForegroundColor Green
 
 # 3. 停止当前运行的客户端进程
 function Stop-CtyunProcesses {
